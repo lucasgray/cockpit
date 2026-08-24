@@ -64,7 +64,7 @@ function createWindow() {
   });
 
   if (!app.isPackaged) {
-    win.loadURL(process.env.COCKPIT_DEV_URL || 'http://localhost:5273');
+    win.loadURL(process.env.COCKPIT_DEV_URL || 'http://127.0.0.1:5273');
   } else {
     win.loadFile(path.join(__dirname, '../dist/index.html'));
   }

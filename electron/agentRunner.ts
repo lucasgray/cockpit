@@ -1,8 +1,18 @@
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
+
+// The Agent SDK is ESM-only, but this Electron main is bundled to CommonJS.
+// A static import compiles to require() and throws ERR_REQUIRE_ESM, so load it
+// through a native dynamic import() that esbuild won't rewrite to require().
+type AgentSdk = typeof import('@anthropic-ai/claude-agent-sdk');
+const importEsm = new Function('m', 'return import(m)') as (m: string) => Promise<AgentSdk>;
+let sdkPromise: Promise<AgentSdk> | null = null;
+function loadSdk(): Promise<AgentSdk> {
+  sdkPromise ??= importEsm('@anthropic-ai/claude-agent-sdk');
+  return sdkPromise;
+}
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
 
@@ -98,6 +108,7 @@ export async function runAgent(
   };
 
   try {
+    const { query } = await loadSdk();
     const stream = query({
       prompt: req.prompt,
       options: {
