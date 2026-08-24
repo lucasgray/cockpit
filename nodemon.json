@@ -1,0 +1,7 @@
+{
+  "watch": ["electron"],
+  "ext": "ts",
+  "legacyWatch": true,
+  "delay": 300,
+  "exec": "npm run build:electron && electron dist-electron/main.cjs"
+}
