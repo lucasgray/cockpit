@@ -32,6 +32,21 @@ ANTHROPIC_API_KEY=sk-ant-... npm run dev
 Without the key the endpoint returns 501 and the client quietly runs the mock.
 The agent edits the fixed sample file (`src/agent/sample.ts`).
 
+### Desktop app (worktree-first)
+
+```bash
+npm run app
+```
+
+One command: it starts Vite, waits for it, builds the Electron main/preload,
+and launches the window. The **left rail lists your live git worktrees** (read
+by the Electron main process via `git worktree list`), with a Worktrees|Files
+switcher; picking one sets the active worktree. Point it at a repo other than
+the default with `COCKPIT_PROJECT_ROOT=/path/to/repo npm run app`.
+
+> Worktrees only appear in the desktop app — the browser can't read git. The
+> in-browser `npm run dev` still works for everything else.
+
 ## Architecture
 
 The UI is driven entirely by a **stream of `AgentEvent`s** — the mock and the
