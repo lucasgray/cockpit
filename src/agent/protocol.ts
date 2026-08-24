@@ -3,7 +3,9 @@ export type Snippet = { lang: string; code: string };
 export type EditOp =
   | { kind: 'insertAfter'; anchor: string; text: string; note?: string }
   | { kind: 'replaceLine'; anchor: string; text: string; note?: string }
-  | { kind: 'append'; text: string; note?: string };
+  | { kind: 'append'; text: string; note?: string }
+  | { kind: 'replaceString'; find: string; replace: string; note?: string }
+  | { kind: 'setContent'; text: string; note?: string };
 
 export type PlanItem = { text: string; snippet?: Snippet };
 

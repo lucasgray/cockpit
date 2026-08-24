@@ -7,12 +7,13 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
-    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
+    "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json",
+    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist-electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist-electron/preload.cjs",
     "app": "concurrently -k -n vite,electron \"vite\" \"wait-on tcp:127.0.0.1:5273 && npm run build:electron && electron dist-electron/main.cjs\""
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.71.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.241",
+    "@anthropic-ai/sdk": "^0.93.0",
     "monaco-editor": "^0.52.2"
   },
   "devDependencies": {

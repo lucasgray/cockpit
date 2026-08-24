@@ -1,3 +1,5 @@
+import type { AgentEvent } from './agent/protocol';
+
 export type Worktree = {
   path: string;
   name: string;
@@ -7,9 +9,17 @@ export type Worktree = {
   dirty: boolean;
 };
 
+export type AgentRunRequest = {
+  prompt: string;
+  cwd: string;
+};
+
 export type CockpitBridge = {
   worktrees: {
     list: () => Promise<Worktree[]>;
+  };
+  agent: {
+    run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;
   };
 };
 

@@ -4,6 +4,7 @@ import { monaco } from './monaco-env';
 import { Cockpit, runStream } from './cockpit';
 import { mockSource } from './agent/mockSource';
 import { parseAgentStream, requestAgent } from './agent/claudeSource';
+import { electronSource } from './agent/electronSource';
 import { sampleFile } from './agent/sample';
 import { WorktreeRail } from './worktrees';
 import type { Worktree } from './bridge';
@@ -56,6 +57,7 @@ const rail = new WorktreeRail(railBody, (wt) => {
   activeWorktree = wt;
   activeWtLabel.textContent = wt.name;
   activeWtLabel.classList.add('set');
+  promptInput.placeholder = `Ask Claude to work in ${wt.name}…`;
 });
 
 function showRailView(view: string) {
@@ -103,6 +105,21 @@ runBtn.addEventListener('click', () =>
 async function sendPrompt() {
   const prompt = promptInput.value.trim();
   if (!prompt) return;
+
+  // Desktop: host a real Claude session in the active worktree.
+  if (window.cockpit?.agent) {
+    if (!activeWorktree) {
+      document.getElementById('status')!.textContent = 'Select a worktree in the left rail first.';
+      return;
+    }
+    const cwd = activeWorktree.path;
+    await guarded('● working…', async () => {
+      await runStream(cockpit, electronSource({ prompt, cwd }));
+    });
+    return;
+  }
+
+  // Browser: the toy /api/agent path, with a mock fallback.
   await guarded('● thinking…', async () => {
     let res: Response;
     try {

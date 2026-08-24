@@ -179,26 +179,51 @@ export class Cockpit {
     model: monaco.editor.ITextModel,
     op: EditOp,
   ): Promise<number> {
-    if (op.kind === 'append') {
-      const line = model.getLineCount();
-      const column = model.getLineMaxColumn(line);
-      await this.typeAt(editor, model, { lineNumber: line, column }, `\n${op.text}`);
-      return line + 1;
+    switch (op.kind) {
+      case 'setContent': {
+        model.setValue(op.text);
+        editor.revealLine(1);
+        return 1;
+      }
+      case 'append': {
+        const line = model.getLineCount();
+        const column = model.getLineMaxColumn(line);
+        await this.typeAt(editor, model, { lineNumber: line, column }, `\n${op.text}`);
+        return line + 1;
+      }
+      case 'replaceString': {
+        const full = model.getValue();
+        const idx = full.indexOf(op.find);
+        if (idx === -1) {
+          const line = model.getLineCount();
+          const column = model.getLineMaxColumn(line);
+          await this.typeAt(editor, model, { lineNumber: line, column }, `\n${op.replace}`);
+          return line + 1;
+        }
+        const start = model.getPositionAt(idx);
+        const end = model.getPositionAt(idx + op.find.length);
+        model.applyEdits([
+          { range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column), text: '' },
+        ]);
+        await this.typeAt(editor, model, { lineNumber: start.lineNumber, column: start.column }, op.replace);
+        return start.lineNumber;
+      }
+      case 'insertAfter': {
+        const anchorLine = this.findAnchor(model, op.anchor);
+        if (anchorLine === -1) return -1;
+        const column = model.getLineMaxColumn(anchorLine);
+        await this.typeAt(editor, model, { lineNumber: anchorLine, column }, `\n${op.text}`);
+        return anchorLine + (op.text.startsWith('\n') ? 2 : 1);
+      }
+      case 'replaceLine': {
+        const anchorLine = this.findAnchor(model, op.anchor);
+        if (anchorLine === -1) return -1;
+        const maxColumn = model.getLineMaxColumn(anchorLine);
+        model.applyEdits([{ range: new monaco.Range(anchorLine, 1, anchorLine, maxColumn), text: '' }]);
+        await this.typeAt(editor, model, { lineNumber: anchorLine, column: 1 }, op.text);
+        return anchorLine;
+      }
     }
-
-    const anchorLine = this.findAnchor(model, op.anchor);
-    if (anchorLine === -1) return -1;
-
-    if (op.kind === 'insertAfter') {
-      const column = model.getLineMaxColumn(anchorLine);
-      await this.typeAt(editor, model, { lineNumber: anchorLine, column }, `\n${op.text}`);
-      return anchorLine + (op.text.startsWith('\n') ? 2 : 1);
-    }
-
-    const maxColumn = model.getLineMaxColumn(anchorLine);
-    model.applyEdits([{ range: new monaco.Range(anchorLine, 1, anchorLine, maxColumn), text: '' }]);
-    await this.typeAt(editor, model, { lineNumber: anchorLine, column: 1 }, op.text);
-    return anchorLine;
   }
 
   private async typeAt(

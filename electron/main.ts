@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import type { Worktree } from '../src/bridge';
+import { runAgent } from './agentRunner';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,6 +72,11 @@ function createWindow() {
 
 app.whenReady().then(() => {
   ipcMain.handle('worktrees:list', () => listWorktrees());
+  ipcMain.handle(
+    'agent:run',
+    (event, req: { prompt: string; cwd: string; runId: string }) =>
+      runAgent(req, (agentEvent) => event.sender.send(`agent:event:${req.runId}`, agentEvent)),
+  );
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
