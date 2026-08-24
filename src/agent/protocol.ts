@@ -11,12 +11,22 @@ export type PlanItem = { text: string; snippet?: Snippet };
 
 export type SampleFile = { path: string; language: string; content: string };
 
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+export type TodoItem = { text: string; status: TodoStatus };
+
 export type AgentEvent =
+  | { type: 'user'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'say'; text: string }
   | { type: 'plan'; title: string; items: PlanItem[] }
+  | { type: 'tool_start'; id: string; name: string; summary: string }
+  | { type: 'tool_end'; id: string; ok: boolean; detail?: string }
+  | { type: 'todos'; items: TodoItem[] }
   | { type: 'edit_start'; file: string; language: string; original: string }
   | { type: 'edit_op'; op: EditOp }
   | { type: 'edit_end' }
   | { type: 'error'; message: string }
-  | { type: 'done' };
+  // Terminates one turn. In a live session the transport stays open and the
+  // next prompt continues the same conversation.
+  | { type: 'done'; cost?: number; turns?: number; interrupted?: boolean };

@@ -25,6 +25,17 @@ export class WorktreeRail {
     }
   }
 
+  /** Re-read git state (dirty flags, new branches) without dropping selection. */
+  async refresh() {
+    if (!window.cockpit) return;
+    try {
+      this.worktrees = await window.cockpit.worktrees.list();
+      this.render();
+    } catch {
+      // Keep the last good list rather than blanking the rail.
+    }
+  }
+
   private render() {
     this.container.innerHTML = '';
     for (const wt of this.worktrees) {

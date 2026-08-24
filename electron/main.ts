@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import type { Worktree } from '../src/bridge';
-import { runAgent } from './agentRunner';
+import { closeAllAgents, interruptAgent, resetAgent, runAgent } from './agentRunner';
 
 const execFileAsync = promisify(execFile);
 
@@ -77,6 +77,8 @@ app.whenReady().then(() => {
     (event, req: { prompt: string; cwd: string; runId: string }) =>
       runAgent(req, (agentEvent) => event.sender.send(`agent:event:${req.runId}`, agentEvent)),
   );
+  ipcMain.handle('agent:interrupt', (_event, cwd: string) => interruptAgent(cwd));
+  ipcMain.handle('agent:reset', (_event, cwd: string) => resetAgent(cwd));
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -85,4 +87,13 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// Live sessions own CLI subprocesses — tear them down instead of orphaning them.
+let quitting = false;
+app.on('before-quit', (event) => {
+  if (quitting) return;
+  event.preventDefault();
+  quitting = true;
+  closeAllAgents().finally(() => app.quit());
 });

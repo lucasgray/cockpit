@@ -1,26 +1,37 @@
 import { monaco } from './monaco-env';
-import type { AgentEvent, EditOp, PlanItem } from './agent/protocol';
+import type { AgentEvent, EditOp, PlanItem, TodoItem } from './agent/protocol';
 
 const sleep = (ms: number) =>
   document.hidden ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 
 type Pos = { lineNumber: number; column: number };
 
+/** Per-conversation scroll + streaming state, so panes can be swapped intact. */
+type Pane = {
+  el: HTMLElement;
+  bubbleType: 'thinking' | 'say' | null;
+  bubbleBody: HTMLElement | null;
+  tools: Map<string, HTMLElement>;
+  todos: HTMLElement | null;
+};
+
 export class Cockpit {
-  private conversation: HTMLElement;
+  private conversations: HTMLElement;
   private tabs: HTMLElement;
   private status: HTMLElement;
   private diffEditor: monaco.editor.IStandaloneDiffEditor;
   private models: monaco.editor.ITextModel[] = [];
 
-  private bubbleType: 'thinking' | 'say' | null = null;
-  private bubbleBody: HTMLElement | null = null;
+  private panes = new Map<string, Pane>();
+  private pane: Pane;
 
   private thoughts: monaco.editor.IModelDeltaDecoration[] = [];
   private thoughtCollection: monaco.editor.IEditorDecorationsCollection | null = null;
 
   constructor() {
-    this.conversation = document.getElementById('conversation')!;
+    this.conversations = document.getElementById('conversation')!;
+    this.pane = this.paneFor('default');
+    this.showPane('default');
     this.tabs = document.getElementById('tabs')!;
     this.status = document.getElementById('status')!;
     const diffContainer = document.getElementById('diff')!;
@@ -41,27 +52,78 @@ export class Cockpit {
     });
   }
 
+  private paneFor(key: string): Pane {
+    let pane = this.panes.get(key);
+    if (!pane) {
+      const el = document.createElement('div');
+      el.className = 'transcript';
+      this.conversations.append(el);
+      pane = { el, bubbleType: null, bubbleBody: null, tools: new Map(), todos: null };
+      this.panes.set(key, pane);
+    }
+    return pane;
+  }
+
+  /**
+   * Make `key`'s transcript the visible one. Panes are kept in the DOM, so
+   * switching worktrees mid-flight never loses a conversation.
+   */
+  showPane(key: string) {
+    this.pane = this.paneFor(key);
+    for (const [k, p] of this.panes) p.el.classList.toggle('visible', k === key);
+    this.scrollDown();
+  }
+
+  /** Clear one transcript (the model-side session is dropped separately). */
+  clearPane(key: string) {
+    const pane = this.paneFor(key);
+    pane.el.innerHTML = '';
+    pane.bubbleType = null;
+    pane.bubbleBody = null;
+    pane.tools.clear();
+    pane.todos = null;
+  }
+
+  /** Full teardown of the visible transcript plus the diff surface. */
   reset() {
-    this.conversation.innerHTML = '';
+    this.pane.el.innerHTML = '';
+    this.pane.bubbleType = null;
+    this.pane.bubbleBody = null;
+    this.pane.tools.clear();
+    this.pane.todos = null;
+    this.resetDiff();
+  }
+
+  resetDiff() {
     this.tabs.innerHTML = '';
     this.status.textContent = '';
     this.diffEditor.setModel(null);
     this.models.forEach((m) => m.dispose());
     this.models = [];
-    this.bubbleType = null;
-    this.bubbleBody = null;
     this.thoughts = [];
     this.thoughtCollection = null;
   }
 
   async handle(event: AgentEvent) {
     switch (event.type) {
+      case 'user':
+        this.addUser(event.text);
+        break;
       case 'thinking':
       case 'say':
         this.appendDelta(event.type, event.text);
         break;
       case 'plan':
         await this.renderPlan(event.title, event.items);
+        break;
+      case 'tool_start':
+        this.startTool(event.id, event.name, event.summary);
+        break;
+      case 'tool_end':
+        this.endTool(event.id, event.ok, event.detail);
+        break;
+      case 'todos':
+        this.renderTodos(event.items);
         break;
       case 'edit_start':
         this.startEdit(event.file, event.language, event.original);
@@ -73,28 +135,107 @@ export class Cockpit {
         this.status.textContent = this.status.textContent.replace('✎ editing', '✓ edited');
         break;
       case 'error':
-        this.bubbleType = null;
+        this.pane.bubbleType = null;
         this.addMessage('error').textContent = `⚠ ${event.message}`;
         break;
       case 'done':
+        this.endTurn(event.cost, event.turns, event.interrupted);
         break;
     }
   }
 
   private scrollDown() {
-    this.conversation.scrollTop = this.conversation.scrollHeight;
+    this.conversations.scrollTop = this.conversations.scrollHeight;
   }
 
   private addMessage(cls: string): HTMLElement {
     const el = document.createElement('div');
     el.className = `msg ${cls}`;
-    this.conversation.appendChild(el);
+    this.pane.el.appendChild(el);
     this.scrollDown();
     return el;
   }
 
+  private addUser(text: string) {
+    this.pane.bubbleType = null;
+    this.addMessage('user').textContent = text;
+  }
+
+  private startTool(id: string, name: string, summary: string) {
+    this.pane.bubbleType = null;
+    const row = this.addMessage('tool running');
+    row.innerHTML = `
+      <span class="tool-glyph"></span>
+      <span class="tool-name"></span>
+      <span class="tool-summary"></span>
+      <span class="tool-detail"></span>`;
+    row.querySelector('.tool-name')!.textContent = name;
+    row.querySelector('.tool-summary')!.textContent = summary;
+    this.pane.tools.set(id, row);
+  }
+
+  private endTool(id: string, ok: boolean, detail?: string) {
+    const row = this.pane.tools.get(id);
+    if (!row) return;
+    this.pane.tools.delete(id);
+    row.classList.remove('running');
+    row.classList.add(ok ? 'ok' : 'failed');
+    if (detail) row.querySelector('.tool-detail')!.textContent = detail;
+    this.scrollDown();
+  }
+
+  /**
+   * The todo list is one live block that rewrites in place — TodoWrite fires
+   * on every status flip and appending each version would bury the transcript.
+   */
+  private renderTodos(items: TodoItem[]) {
+    this.pane.bubbleType = null;
+    if (!this.pane.todos) {
+      this.pane.todos = this.addMessage('todos');
+    }
+    const done = items.filter((t) => t.status === 'completed').length;
+    this.pane.todos.innerHTML = '';
+
+    const head = document.createElement('div');
+    head.className = 'todos-title';
+    head.textContent = `☑ ${done}/${items.length}`;
+    this.pane.todos.append(head);
+
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = `todo ${item.status}`;
+      const glyph = document.createElement('span');
+      glyph.className = 'todo-glyph';
+      glyph.textContent = item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '▸' : '·';
+      const text = document.createElement('span');
+      text.textContent = item.text;
+      row.append(glyph, text);
+      this.pane.todos.append(row);
+    }
+    this.scrollDown();
+  }
+
+  private endTurn(cost?: number, turns?: number, interrupted?: boolean) {
+    this.pane.bubbleType = null;
+    // Any tool still marked running was cut off — don't leave it spinning.
+    for (const row of this.pane.tools.values()) {
+      row.classList.remove('running');
+      row.classList.add('failed');
+    }
+    this.pane.tools.clear();
+
+    const bits: string[] = [];
+    if (interrupted) bits.push('stopped');
+    if (turns) bits.push(`${turns} turn${turns === 1 ? '' : 's'}`);
+    // Cost is cumulative for the session, not per turn — label it as such.
+    if (cost !== undefined) bits.push(`$${cost.toFixed(4)} session total`);
+    if (!bits.length) return;
+
+    this.addMessage('turn-end').textContent = bits.join(' · ');
+  }
+
   private appendDelta(type: 'thinking' | 'say', text: string) {
-    if (this.bubbleType !== type || !this.bubbleBody) {
+    if (this.pane.bubbleType !== type || !this.pane.bubbleBody) {
       const wrap = this.addMessage(type);
       if (type === 'thinking') {
         const label = document.createElement('div');
@@ -105,15 +246,15 @@ export class Cockpit {
       const body = document.createElement('div');
       body.className = 'text';
       wrap.append(body);
-      this.bubbleType = type;
-      this.bubbleBody = body;
+      this.pane.bubbleType = type;
+      this.pane.bubbleBody = body;
     }
-    this.bubbleBody.textContent += text;
+    this.pane.bubbleBody.textContent += text;
     this.scrollDown();
   }
 
   private async renderPlan(title: string, items: PlanItem[]) {
-    this.bubbleType = null;
+    this.pane.bubbleType = null;
     const wrap = this.addMessage('plan');
     const heading = document.createElement('div');
     heading.className = 'plan-title';
@@ -140,7 +281,7 @@ export class Cockpit {
   }
 
   private startEdit(file: string, language: string, original: string) {
-    this.bubbleType = null;
+    this.pane.bubbleType = null;
     this.tabs.innerHTML = '';
     const tab = document.createElement('div');
     tab.className = 'tab active';
@@ -262,8 +403,18 @@ export class Cockpit {
   }
 }
 
-export async function runStream(ui: Cockpit, source: AsyncIterable<AgentEvent>) {
-  ui.reset();
+/**
+ * Drive the cockpit from one turn's worth of events. `reset` clears the whole
+ * transcript first — right for a one-shot demo, wrong for a live session where
+ * each turn appends to the conversation already on screen.
+ */
+export async function runStream(
+  ui: Cockpit,
+  source: AsyncIterable<AgentEvent>,
+  { reset = true }: { reset?: boolean } = {},
+) {
+  if (reset) ui.reset();
+  else ui.resetDiff();
   for await (const event of source) {
     await ui.handle(event);
     if (event.type === 'done') break;

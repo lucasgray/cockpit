@@ -24,6 +24,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div class="spacer"></div>
       <input id="prompt" class="prompt" placeholder="Ask the agent to change ${sampleFile.path}…" />
       <button id="send" class="btn primary">Send</button>
+      <button id="stop" class="btn danger" hidden>■ Stop</button>
+      <button id="new" class="btn" title="Drop this worktree's session and start over">＋ New</button>
       <button id="run" class="btn">▶ Demo</button>
     </header>
     <main class="body">
@@ -47,6 +49,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 const cockpit = new Cockpit();
 const runBtn = document.getElementById('run') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
+const stopBtn = document.getElementById('stop') as HTMLButtonElement;
+const newBtn = document.getElementById('new') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLInputElement;
 const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 const railBody = document.getElementById('rail-body') as HTMLElement;
@@ -58,6 +62,8 @@ const rail = new WorktreeRail(railBody, (wt) => {
   activeWtLabel.textContent = wt.name;
   activeWtLabel.classList.add('set');
   promptInput.placeholder = `Ask Claude to work in ${wt.name}…`;
+  // Each worktree keeps its own live session; show its transcript.
+  cockpit.showPane(wt.path);
 });
 
 function showRailView(view: string) {
@@ -78,49 +84,74 @@ document.querySelectorAll<HTMLButtonElement>('.rail-tab').forEach((tab) =>
 rail.load();
 
 let running = false;
+/** The worktree whose turn is in flight — what ■ Stop interrupts. */
+let runningCwd: string | null = null;
 
-async function guarded(label: string, work: () => Promise<void>) {
+async function guarded(label: string, cwd: string | null, work: () => Promise<void>) {
   if (running) return;
   running = true;
+  runningCwd = cwd;
   runBtn.disabled = true;
+  newBtn.disabled = true;
   sendBtn.disabled = true;
   sendBtn.textContent = label;
+  stopBtn.hidden = cwd === null;
   try {
     await work();
   } finally {
     running = false;
+    runningCwd = null;
     runBtn.disabled = false;
+    newBtn.disabled = false;
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';
+    stopBtn.hidden = true;
     runBtn.textContent = '↺ Demo';
   }
 }
 
 runBtn.addEventListener('click', () =>
-  guarded('…', async () => {
+  guarded('…', null, async () => {
     await runStream(cockpit, mockSource());
   }),
 );
+
+stopBtn.addEventListener('click', () => {
+  if (runningCwd) window.cockpit?.agent.interrupt(runningCwd);
+});
+
+newBtn.addEventListener('click', async () => {
+  if (running) return;
+  if (activeWorktree && window.cockpit?.agent) {
+    await window.cockpit.agent.reset(activeWorktree.path);
+    cockpit.clearPane(activeWorktree.path);
+  } else {
+    cockpit.reset();
+  }
+  cockpit.resetDiff();
+});
 
 async function sendPrompt() {
   const prompt = promptInput.value.trim();
   if (!prompt) return;
 
-  // Desktop: host a real Claude session in the active worktree.
+  // Desktop: continue the live Claude session pinned to the active worktree.
   if (window.cockpit?.agent) {
     if (!activeWorktree) {
       document.getElementById('status')!.textContent = 'Select a worktree in the left rail first.';
       return;
     }
     const cwd = activeWorktree.path;
-    await guarded('● working…', async () => {
-      await runStream(cockpit, electronSource({ prompt, cwd }));
+    promptInput.value = '';
+    await guarded('● working…', cwd, async () => {
+      await runStream(cockpit, electronSource({ prompt, cwd }), { reset: false });
     });
+    rail.refresh();
     return;
   }
 
   // Browser: the toy /api/agent path, with a mock fallback.
-  await guarded('● thinking…', async () => {
+  await guarded('● thinking…', null, async () => {
     let res: Response;
     try {
       res = await requestAgent(prompt, sampleFile);

@@ -20,6 +20,8 @@ export type CockpitBridge = {
   };
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;
+    interrupt: (cwd: string) => Promise<void>;
+    reset: (cwd: string) => Promise<void>;
   };
 };
 

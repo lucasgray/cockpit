@@ -16,6 +16,8 @@ const bridge: CockpitBridge = {
         .invoke('agent:run', { ...req, runId })
         .finally(() => ipcRenderer.removeListener(channel, listener));
     },
+    interrupt: (cwd: string) => ipcRenderer.invoke('agent:interrupt', cwd),
+    reset: (cwd: string) => ipcRenderer.invoke('agent:reset', cwd),
   },
 };
 

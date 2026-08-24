@@ -22,6 +22,8 @@ export function electronSource(req: AgentRunRequest): AsyncGenerator<AgentEvent>
     });
 
   return (async function* () {
+    // Echo the prompt so the transcript reads as a conversation.
+    yield { type: 'user', text: req.prompt } as AgentEvent;
     while (true) {
       while (queue.length) yield queue.shift()!;
       if (finished) return;
