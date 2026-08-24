@@ -29,4 +29,4 @@ export type AgentEvent =
   | { type: 'error'; message: string }
   // Terminates one turn. In a live session the transport stays open and the
   // next prompt continues the same conversation.
-  | { type: 'done'; cost?: number; turns?: number; interrupted?: boolean };
+  | { type: 'done'; interrupted?: boolean };

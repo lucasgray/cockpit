@@ -139,7 +139,7 @@ export class Cockpit {
         this.addMessage('error').textContent = `⚠ ${event.message}`;
         break;
       case 'done':
-        this.endTurn(event.cost, event.turns, event.interrupted);
+        this.endTurn(event.interrupted);
         break;
     }
   }
@@ -215,7 +215,7 @@ export class Cockpit {
     this.scrollDown();
   }
 
-  private endTurn(cost?: number, turns?: number, interrupted?: boolean) {
+  private endTurn(interrupted?: boolean) {
     this.pane.bubbleType = null;
     // Any tool still marked running was cut off — don't leave it spinning.
     for (const row of this.pane.tools.values()) {
@@ -224,14 +224,8 @@ export class Cockpit {
     }
     this.pane.tools.clear();
 
-    const bits: string[] = [];
-    if (interrupted) bits.push('stopped');
-    if (turns) bits.push(`${turns} turn${turns === 1 ? '' : 's'}`);
-    // Cost is cumulative for the session, not per turn — label it as such.
-    if (cost !== undefined) bits.push(`$${cost.toFixed(4)} session total`);
-    if (!bits.length) return;
-
-    this.addMessage('turn-end').textContent = bits.join(' · ');
+    // Like CC desktop: a normal turn just ends. Only surface an interrupt.
+    if (interrupted) this.addMessage('turn-end').textContent = 'Stopped';
   }
 
   private appendDelta(type: 'thinking' | 'say', text: string) {

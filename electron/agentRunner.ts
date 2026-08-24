@@ -285,12 +285,7 @@ class Session {
         if (msg.subtype !== 'success') {
           this.emit({ type: 'error', message: `Run ended: ${msg.subtype}` });
         }
-        this.emit({
-          type: 'done',
-          cost: 'total_cost_usd' in msg ? msg.total_cost_usd : undefined,
-          turns: 'num_turns' in msg ? msg.num_turns : undefined,
-          interrupted: this.interrupted,
-        });
+        this.emit({ type: 'done', interrupted: this.interrupted });
         this.interrupted = false;
         this.finishTurn();
       }
