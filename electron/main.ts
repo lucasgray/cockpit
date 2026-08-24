@@ -8,7 +8,7 @@ import { runAgent } from './agentRunner';
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT =
-  process.env.COCKPIT_PROJECT_ROOT || '/Users/lucas-comp/projects/comp-monorepo';
+  process.env.COCKPIT_PROJECT_ROOT || '/Users/lucas-comp/projects/agent-cockpit';
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 4 * 1024 * 1024 });
