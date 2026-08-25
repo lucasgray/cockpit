@@ -223,11 +223,24 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* The row, not the button, carries selection: the outline has to enclose the
+   status/remove gutter and any confirm or error line hanging off the row. */
 .wt-row {
   position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.wt-row:hover:not(.pending) {
+  background: var(--panel-2);
+}
+
+.wt-row.active {
+  background: var(--panel-2);
+  border-color: var(--accent);
 }
 
 .wt {
@@ -235,8 +248,8 @@ body {
   min-width: 0;
   text-align: left;
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  border: 0;
+  border-radius: 7px;
   padding: 8px 10px;
   cursor: pointer;
   color: var(--text);
@@ -244,15 +257,6 @@ body {
   flex-direction: column;
   gap: 3px;
   overflow: hidden;
-}
-
-.wt:hover {
-  background: var(--panel-2);
-}
-
-.wt.active {
-  background: var(--panel-2);
-  border-color: var(--accent);
 }
 
 .wt-top {
@@ -334,21 +338,6 @@ body {
   }
 }
 
-/* The dev-server port, at the right of the name line. Dim while merely
-   assigned, lit while something is serving on it — a different axis from the
-   gutter dot, which is about the agent rather than the server. */
-.wt-port {
-  margin-left: auto;
-  flex: none;
-  font-size: 10px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--dim-2);
-}
-
-.wt-port.live {
-  color: #6bbf74;
-}
-
 .wt-bottom {
   display: flex;
   align-items: baseline;
@@ -364,9 +353,11 @@ body {
   text-overflow: ellipsis;
 }
 
-/* Churn counts hold their width; the branch name is what gets truncated. */
+/* Floated hard right on the name line, just inside the status gutter. Holds
+   its width; the worktree name is what gets truncated when space runs short. */
 .wt-stat {
   margin-left: auto;
+  padding-left: 6px;
   flex: none;
   display: flex;
   gap: 5px;
@@ -415,7 +406,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 2px 6px 10px;
+  padding: 2px 8px 6px 10px;
 }
 
 .wt-confirm-note {
