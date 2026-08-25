@@ -1,5 +1,6 @@
 import type { AgentEvent } from './agent/protocol';
 import type { CockpitSettings } from './settings';
+import type { RunCommand, RunEvent, RunStatus } from './runConfig';
 
 export type Worktree = {
   path: string;
@@ -63,6 +64,24 @@ export type CockpitBridge = {
     interrupt: (cwd: string) => Promise<void>;
     /** Answer a pending `question` event, unblocking the ask tool's turn. */
     answer: (cwd: string, id: string, selection: string) => Promise<void>;
+  };
+  /**
+   * Starting the project a worktree holds — one run per worktree, concurrently,
+   * each on its own assigned port. Starting one already up restarts it.
+   *
+   * A run has no pane of its own: it serves on a port, and the browser is where
+   * you look at it. All the UI carries is the button's state and, when a run
+   * dies, the line it died on.
+   */
+  run: {
+    /** The command that would run, and where it was resolved from. */
+    detect: (cwd: string) => Promise<RunCommand>;
+    /** Start in `cwd`; `command` overrides resolution for this run only. */
+    start: (cwd: string, command?: string) => Promise<RunStatus>;
+    stop: (cwd: string) => Promise<RunStatus>;
+    status: (cwd: string) => Promise<RunStatus>;
+    /** Subscribe to status changes in every worktree. Returns unsubscribe. */
+    onEvent: (listener: (event: RunEvent) => void) => () => void;
   };
   /**
    * The app's own SQLite state, in the main process. Transcripts are kept as the

@@ -7,6 +7,7 @@ import { parseAgentStream, requestAgent } from './agent/claudeSource';
 import { electronSource } from './agent/electronSource';
 import { sampleFile } from './agent/sample';
 import { WorktreeRail } from './worktrees';
+import { IDLE_STATUS, type RunCommand, type RunStatus } from './runConfig';
 import type { Worktree } from './bridge';
 
 registerCockpitTheme();
@@ -21,6 +22,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </div>
       <span class="active-wt" id="active-wt">no worktree</span>
       <div class="spacer"></div>
+      <button id="run-app" class="btn primary" disabled>▶ Run</button>
     </header>
     <main class="body">
       <aside class="rail">
@@ -58,6 +60,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 `;
 
 const cockpit = new Cockpit();
+const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
@@ -65,6 +68,98 @@ const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 const railBody = document.getElementById('rail-body') as HTMLElement;
 
 let activeWorktree: Worktree | null = null;
+
+/**
+ * ▶ Run in the topbar: start (or stop) the project the *active* worktree holds.
+ *
+ * Runs are per-worktree and concurrent, each on its own assigned port, so this
+ * button always speaks for the selected worktree — a sibling still serving on its
+ * own port doesn't change it. There is no output pane: a run serves on a port and
+ * the browser is where you look at it, so all the UI carries is this button's
+ * state and, when a run dies, the line it died on in the statusline.
+ */
+let runState: RunStatus = { ...IDLE_STATUS };
+/** What the active worktree *would* run — the tooltip before anything starts. */
+let runDetected: RunCommand = { command: '', source: '' };
+
+function setStatusLine(text: string) {
+  document.getElementById('status')!.textContent = text;
+}
+
+function paintRunButton() {
+  const running = runState.state === 'running';
+  runAppBtn.textContent = running ? '■ Stop' : '▶ Run';
+  runAppBtn.classList.toggle('danger', running);
+  runAppBtn.classList.toggle('primary', !running);
+  runAppBtn.disabled = !window.cockpit || !activeWorktree;
+
+  if (!activeWorktree) {
+    runAppBtn.title = 'Select a worktree first';
+    return;
+  }
+  const command = runState.command || runDetected.command;
+  runAppBtn.title = command
+    ? `${command} — port ${activeWorktree.port} (${runState.state})`
+    : `Nothing in ${activeWorktree.name} says how to run it`;
+}
+
+/** Adopt a worktree's run — it may already be serving from an earlier click. */
+async function setRunWorktree(wt: Worktree | null) {
+  runState = { ...IDLE_STATUS, cwd: wt?.path ?? null };
+  runDetected = { command: '', source: '' };
+  paintRunButton();
+  if (!window.cockpit || !wt) return;
+
+  const [status, detected] = await Promise.all([
+    window.cockpit.run.status(wt.path),
+    window.cockpit.run.detect(wt.path),
+  ]);
+  // The rail may have moved on while those were in flight; the newer selection
+  // owns the button.
+  if (activeWorktree?.path !== wt.path) return;
+  runState = status;
+  runDetected = detected;
+  paintRunButton();
+}
+
+/** One line for a run that changed state, in any worktree — the console's heir. */
+function reportRun(cwd: string, status: RunStatus) {
+  const name = cwd.split('/').filter(Boolean).pop() ?? cwd;
+  const why = status.error ? ` — ${status.error}` : '';
+  if (status.state === 'running') {
+    setStatusLine(`${name}: serving on port ${status.port} (${status.command})`);
+  } else if (status.state === 'idle') {
+    setStatusLine(`${name}: stopped${why}`);
+  } else if (status.state === 'exited') {
+    setStatusLine(`${name}: run exited ${status.exitCode}`);
+  } else {
+    const code = status.exitCode === null ? '' : ` (exit ${status.exitCode})`;
+    setStatusLine(`${name}: run failed${code}${why}`);
+  }
+}
+
+runAppBtn.addEventListener('click', () => {
+  const wt = activeWorktree;
+  if (!wt || !window.cockpit) return;
+  if (runState.state === 'running') {
+    void window.cockpit.run.stop(wt.path);
+  } else {
+    // Starting is slow enough to need an acknowledgement of its own — the next
+    // word from the run is a status event, which may be seconds away.
+    setStatusLine(`${wt.name}: starting ${runDetected.command || 'run'} on port ${wt.port}…`);
+    void window.cockpit.run.start(wt.path);
+  }
+});
+
+// Runs come up and go down in worktrees other than the active one; status events
+// fire on transitions only, never on output, so this stays cheap.
+window.cockpit?.run.onEvent(({ cwd, status }) => {
+  if (cwd === activeWorktree?.path) {
+    runState = status;
+    paintRunButton();
+  }
+  reportRun(cwd, status);
+});
 
 const rail = new WorktreeRail(
   railBody,
@@ -76,6 +171,7 @@ const rail = new WorktreeRail(
     // the stored one the first time it's opened this run.
     cockpit.showPane(wt.path);
     cockpit.restorePane(wt.path);
+    void setRunWorktree(wt);
     // Send/Stop speak for the selected worktree — refresh them on every switch.
     updateSendStop();
     // Picking a worktree is the start of typing at it — go straight to the box.
@@ -87,6 +183,8 @@ const rail = new WorktreeRail(
       activeWtLabel.textContent = 'no worktree';
       activeWtLabel.classList.remove('set');
       cockpit.resetDiff();
+      // The directory is gone; its run went with it in removeWorktree.
+      void setRunWorktree(null);
       updateSendStop();
     }
     cockpit.dropPane(path);
@@ -116,14 +214,13 @@ viewChangesBtn.addEventListener('click', async () => {
 // The create hook runs in the background long after the worktree appears, so its
 // outcome lands here rather than in the create call's result.
 window.cockpit?.worktrees.onHook((result) => {
-  const status = document.getElementById('status')!;
   if (result.error) {
-    status.textContent = `${result.branch}: hook could not start — ${result.error}`;
+    setStatusLine(`${result.branch}: hook could not start — ${result.error}`);
   } else if (result.code === 0) {
-    status.textContent = `${result.branch}: ready on port ${result.port} (${result.command})`;
+    setStatusLine(`${result.branch}: ready on port ${result.port} (${result.command})`);
   } else {
     const why = result.tail.trim().split('\n').slice(-1)[0] ?? '';
-    status.textContent = `${result.branch}: hook exited ${result.code} — ${why}`;
+    setStatusLine(`${result.branch}: hook exited ${result.code} — ${why}`);
   }
   rail.refresh();
 });
@@ -192,7 +289,7 @@ async function sendPrompt() {
   // each unspooling into its own transcript whether or not it's on screen.
   if (window.cockpit?.agent) {
     if (!activeWorktree) {
-      document.getElementById('status')!.textContent = 'Select a worktree in the left rail first.';
+      setStatusLine('Select a worktree in the left rail first.');
       return;
     }
     const cwd = activeWorktree.path;

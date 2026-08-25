@@ -6,6 +6,15 @@ import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
 import { answerAgent, closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
+import {
+  closeRun,
+  detectRunCommand,
+  onRunEvent,
+  runEnv,
+  runStatus,
+  startRun,
+  stopRun,
+} from './runner';
 import { ensurePort } from './ports';
 import { getStore, openStore } from './store';
 import type { CockpitSettings } from '../src/settings';
@@ -58,15 +67,8 @@ function runCreateHook(dir: string, branch: string, port: number) {
     env: {
       ...process.env,
       // The hook's whole reason for existing: it can bake the port into a file
-      // at the one moment the worktree is new. `PORT` is the near-universal
-      // convention, `COCKPIT_PORT` the unambiguous one for projects that
-      // already use `PORT` for something else.
-      COCKPIT_PORT: String(port),
-      PORT: String(port),
-      // The tail lands in the statusline, which renders ANSI colour as escape
-      // noise — ask for plain text instead of stripping it after the fact.
-      FORCE_COLOR: '0',
-      NO_COLOR: '1',
+      // at the one moment the worktree is new — the same env a run would get.
+      ...runEnv(port),
       COCKPIT_WORKTREE: dir,
       COCKPIT_BRANCH: branch,
     },
@@ -237,12 +239,13 @@ async function removeWorktree(cwd: string): Promise<WorktreeRemoveResult> {
   if (!target) return { ok: false, error: 'Worktree not found' };
   if (target.isMain) return { ok: false, error: 'The main worktree cannot be removed' };
 
-  // The session holds a CLI subprocess with this directory as its cwd — close it
-  // before the directory disappears from under it. Bounded, because it must not
-  // be able to wedge the removal: worst case it's orphaned and reaped at quit,
-  // which beats a button that never comes back.
+  // The session holds a CLI subprocess with this directory as its cwd, and a run
+  // may hold a dev server on it too — close both before the directory disappears
+  // from under them. Bounded, because neither must be able to wedge the removal:
+  // worst case they're orphaned and reaped at quit, which beats a button that
+  // never comes back.
   await Promise.race([
-    closeAgent(cwd).catch(() => {}),
+    Promise.allSettled([closeAgent(cwd), stopRun(cwd)]),
     new Promise((resolve) => setTimeout(resolve, 5000)),
   ]);
 
@@ -273,6 +276,12 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
     },
+  });
+
+  // A run belongs to the app, not to a call, so its status goes straight to the
+  // window. Guarded because a run can change state while the window tears down.
+  onRunEvent((event) => {
+    if (!win.isDestroyed()) win.webContents.send('run:event', event);
   });
 
   if (!app.isPackaged) {
@@ -313,6 +322,11 @@ app.whenReady().then(() => {
       answerAgent(req.cwd, req.id, req.selection),
   );
 
+  ipcMain.handle('run:detect', (_event, cwd: string) => detectRunCommand(cwd));
+  ipcMain.handle('run:start', (_event, cwd: string, command?: string) => startRun(cwd, command));
+  ipcMain.handle('run:stop', (_event, cwd: string) => stopRun(cwd));
+  ipcMain.handle('run:status', (_event, cwd: string) => runStatus(cwd));
+
   ipcMain.handle('store:transcript', (_event, cwd: string) => getStore().transcript(cwd));
   ipcMain.handle('store:clearTranscript', (_event, cwd: string) => getStore().clearTranscript(cwd));
   ipcMain.handle('store:selectedWorktree', () => getStore().selectedWorktree());
@@ -334,15 +348,14 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// A live session owns a CLI subprocess — tear them down instead of orphaning
-// them once the window that started them is gone.
+// Live sessions and dev servers both own subprocesses — tear them down instead
+// of orphaning them holding a port.
 let quitting = false;
 app.on('before-quit', (event) => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
-  closeAllAgents()
-    .catch(() => {})
+  Promise.allSettled([closeAllAgents(), closeRun()])
     .finally(() => getStore().close())
     .finally(() => app.quit());
 });
