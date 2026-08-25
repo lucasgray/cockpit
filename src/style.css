@@ -276,6 +276,47 @@ body {
   text-overflow: ellipsis;
 }
 
+.wt-new {
+  padding: 2px 2px 8px;
+}
+
+.wt-new-btn {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dim);
+  background: transparent;
+  border: 1px dashed var(--border-2);
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.wt-new-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.wt-new-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wt-new-input {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 7px 10px;
+  outline: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .conversation {
   border-right: 1px solid var(--border);
   background: var(--bg);

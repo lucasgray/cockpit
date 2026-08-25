@@ -5,6 +5,7 @@ import type { AgentRunRequest, CockpitBridge } from '../src/bridge';
 const bridge: CockpitBridge = {
   worktrees: {
     list: () => ipcRenderer.invoke('worktrees:list'),
+    create: (branch: string) => ipcRenderer.invoke('worktrees:create', branch),
   },
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => {
