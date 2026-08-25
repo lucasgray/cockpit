@@ -4,10 +4,15 @@ import type { AgentEvent, EditOp, PlanItem, TodoItem } from './agent/protocol';
 const sleep = (ms: number) =>
   document.hidden ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 
+// Transcripts are persisted here (keyed by worktree) so a reload — Vite HMR or
+// a full nodemon restart — restores the chat instead of wiping it.
+const STORE = 'cockpit:transcript:';
+
 type Pos = { lineNumber: number; column: number };
 
 /** Per-conversation scroll + streaming state, so panes can be swapped intact. */
 type Pane = {
+  key: string;
   el: HTMLElement;
   bubbleType: 'thinking' | 'say' | null;
   bubbleBody: HTMLElement | null;
@@ -27,6 +32,7 @@ export class Cockpit {
 
   private thoughts: monaco.editor.IModelDeltaDecoration[] = [];
   private thoughtCollection: monaco.editor.IEditorDecorationsCollection | null = null;
+  private persistTimer: number | null = null;
 
   constructor() {
     this.conversations = document.getElementById('conversation')!;
@@ -58,8 +64,14 @@ export class Cockpit {
       const el = document.createElement('div');
       el.className = 'transcript';
       this.conversations.append(el);
-      pane = { el, bubbleType: null, bubbleBody: null, tools: new Map(), todos: null };
+      pane = { key, el, bubbleType: null, bubbleBody: null, tools: new Map(), todos: null };
       this.panes.set(key, pane);
+      // Restore a persisted transcript so a reload keeps the chat.
+      const saved = localStorage.getItem(STORE + key);
+      if (saved) {
+        el.innerHTML = saved;
+        pane.todos = el.querySelector<HTMLElement>('.todos');
+      }
     }
     return pane;
   }
@@ -82,6 +94,7 @@ export class Cockpit {
     pane.bubbleBody = null;
     pane.tools.clear();
     pane.todos = null;
+    localStorage.removeItem(STORE + key);
   }
 
   /** Full teardown of the visible transcript plus the diff surface. */
@@ -91,7 +104,22 @@ export class Cockpit {
     this.pane.bubbleBody = null;
     this.pane.tools.clear();
     this.pane.todos = null;
+    localStorage.removeItem(STORE + this.pane.key);
     this.resetDiff();
+  }
+
+  /** Debounced snapshot of the active transcript to localStorage. */
+  private persist() {
+    const pane = this.pane;
+    if (this.persistTimer !== null) return;
+    this.persistTimer = window.setTimeout(() => {
+      this.persistTimer = null;
+      try {
+        localStorage.setItem(STORE + pane.key, pane.el.innerHTML);
+      } catch {
+        // quota or serialization failure — a lost transcript beats a crash
+      }
+    }, 200);
   }
 
   resetDiff() {
@@ -142,6 +170,7 @@ export class Cockpit {
         this.endTurn(event.interrupted);
         break;
     }
+    this.persist();
   }
 
   private scrollDown() {
