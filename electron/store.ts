@@ -124,6 +124,41 @@ export class Store {
     else this.writeMeta('selectedWorktree', cwd);
   }
 
+  railView(): string | null {
+    return this.readMeta('railView');
+  }
+
+  setRailView(view: string) {
+    this.writeMeta('railView', view);
+  }
+
+  /**
+   * The file open in each worktree's editor pane. One row rather than a table:
+   * it's a handful of paths, rewritten on every click, and worth exactly as much
+   * as the selected-worktree pointer beside it.
+   */
+  private openFiles(): Record<string, string> {
+    const raw = this.readMeta('openFiles');
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  openFile(cwd: string): string | null {
+    return this.openFiles()[cwd] ?? null;
+  }
+
+  setOpenFile(cwd: string, file: string | null) {
+    const files = this.openFiles();
+    if (file === null) delete files[cwd];
+    else files[cwd] = file;
+    this.writeMeta('openFiles', JSON.stringify(files));
+  }
+
   // ---- worktree ports ----------------------------------------------------
 
   /**

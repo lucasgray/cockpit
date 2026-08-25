@@ -48,6 +48,34 @@ export type WorktreeHookResult = {
   error?: string;
 };
 
+/** One row in the file tree. `path` is relative to the worktree, POSIX-style. */
+export type FileEntry = {
+  name: string;
+  path: string;
+  kind: 'dir' | 'file';
+};
+
+export type FileContents = {
+  path: string;
+  text: string;
+  bytes: number;
+  /** Why `text` is empty, when it is — the viewer says so instead of drawing it. */
+  reason?: 'binary' | 'too-large';
+  /**
+   * mtime at the moment of the read, echoed back on write. The agent edits these
+   * same files, so a save has to be able to tell it isn't clobbering a newer one.
+   */
+  mtime: number;
+};
+
+export type FileWriteResult = {
+  ok: boolean;
+  mtime?: number;
+  /** The file changed under us — the operator chooses reload or overwrite. */
+  conflict?: boolean;
+  error?: string;
+};
+
 export type CockpitBridge = {
   worktrees: {
     list: () => Promise<Worktree[]>;
@@ -64,6 +92,18 @@ export type CockpitBridge = {
     interrupt: (cwd: string) => Promise<void>;
     /** Answer a pending `question` event, unblocking the ask tool's turn. */
     answer: (cwd: string, id: string, selection: string) => Promise<void>;
+  };
+  /**
+   * Browsing and editing what a worktree holds. Every path is relative to the
+   * worktree root, and the main process refuses anything that resolves outside
+   * it — this is a file API for the tree, not for the disk.
+   */
+  files: {
+    /** One directory's entries. Lazy: the tree asks again on each expand. */
+    list: (cwd: string, dir: string) => Promise<FileEntry[]>;
+    read: (cwd: string, path: string) => Promise<FileContents>;
+    /** `mtime` is the one from the matching `read`; a newer file is a conflict. */
+    write: (cwd: string, path: string, text: string, mtime: number) => Promise<FileWriteResult>;
   };
   /**
    * Starting the project a worktree holds — one run per worktree, concurrently,
@@ -93,6 +133,12 @@ export type CockpitBridge = {
     clearTranscript: (cwd: string) => Promise<void>;
     selectedWorktree: () => Promise<string | null>;
     setSelectedWorktree: (cwd: string | null) => Promise<void>;
+    /** The file each worktree had open, so the app reopens where it was left. */
+    openFile: (cwd: string) => Promise<string | null>;
+    setOpenFile: (cwd: string, path: string | null) => Promise<void>;
+    /** Which left-rail tab was showing: 'worktrees' or 'explorer'. */
+    railView: () => Promise<string | null>;
+    setRailView: (view: string) => Promise<void>;
     settings: () => Promise<CockpitSettings>;
     saveSettings: (patch: Partial<CockpitSettings>) => Promise<CockpitSettings>;
   };
