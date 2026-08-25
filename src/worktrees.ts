@@ -1,23 +1,17 @@
 import type { Worktree } from './bridge';
 
-/** Survives reloads and app restarts so the rail comes back where you left it. */
-const SELECTED_KEY = 'cockpit.selectedWorktree';
-
-function readStoredPath(): string | null {
-  try {
-    return localStorage.getItem(SELECTED_KEY);
-  } catch {
-    return null;
-  }
+/**
+ * Survives reloads and app restarts so the rail comes back where you left it.
+ * Kept in the app's own store rather than localStorage, which is scoped to the
+ * page origin — that differs between the dev server and a packaged build, so
+ * anything kept there quietly vanishes the first time the app ships.
+ */
+async function readStoredPath(): Promise<string | null> {
+  return (await window.cockpit?.store.selectedWorktree()) ?? null;
 }
 
 function writeStoredPath(path: string | null) {
-  try {
-    if (path === null) localStorage.removeItem(SELECTED_KEY);
-    else localStorage.setItem(SELECTED_KEY, path);
-  } catch {
-    // Private mode / storage disabled — selection just won't persist.
-  }
+  window.cockpit?.store.setSelectedWorktree(path);
 }
 
 export class WorktreeRail {
@@ -39,7 +33,7 @@ export class WorktreeRail {
     this.container.innerHTML = `<div class="rail-note">Loading worktrees…</div>`;
     try {
       this.worktrees = await window.cockpit.worktrees.list();
-      this.restoreSelection();
+      await this.restoreSelection();
       this.render();
     } catch (error) {
       this.container.innerHTML = `<div class="rail-note">⚠ ${String(error)}</div>`;
@@ -47,9 +41,9 @@ export class WorktreeRail {
   }
 
   /** Re-select the worktree from the last session, once its path still exists. */
-  private restoreSelection() {
+  private async restoreSelection() {
     if (this.activePath && this.worktrees.some((wt) => wt.path === this.activePath)) return;
-    const stored = readStoredPath();
+    const stored = await readStoredPath();
     if (!stored) return;
     const wt = this.worktrees.find((candidate) => candidate.path === stored);
     if (!wt) {

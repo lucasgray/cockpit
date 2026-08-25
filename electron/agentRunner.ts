@@ -1,4 +1,10 @@
-import type { PermissionResult, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  HookJSONOutput,
+  HookInput,
+  PermissionResult,
+  Query,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentEvent, TodoItem, TodoStatus } from '../src/agent/protocol';
@@ -197,14 +203,39 @@ class Session {
   }
 
   private canUseTool = async (
-    toolName: string,
+    _toolName: string,
     input: Record<string, unknown>,
   ): Promise<PermissionResult> => {
-    // Snapshot the file before the write lands so the diff has an "original".
-    if (EDIT_TOOLS.has(toolName)) {
-      await renderEdit(this.cwd, toolName, input, (e) => this.emit(e));
-    }
     return { behavior: 'allow', updatedInput: input };
+  };
+
+  /**
+   * Drives the diff view. This has to be a hook rather than part of canUseTool:
+   * the permission callback is skipped entirely for anything already approved by
+   * an allow rule or permission mode, so hanging the display off it meant the
+   * diff silently never opened for users who allowlist Edit/Write. PreToolUse
+   * fires for every call regardless of how permission resolves.
+   *
+   * It must also stay a *blocking* seam. renderEdit reads the file to get the
+   * "before" side of the diff, so it has to win the race against the write —
+   * watching the message stream instead would read whatever happened to be on
+   * disk by then, and quietly show an empty diff.
+   */
+  private preToolUse = async (input: HookInput): Promise<HookJSONOutput> => {
+    if (input.hook_event_name !== 'PreToolUse') return {};
+    if (!EDIT_TOOLS.has(input.tool_name)) return {};
+    try {
+      await renderEdit(
+        this.cwd,
+        input.tool_name,
+        (input.tool_input ?? {}) as Record<string, unknown>,
+        (e) => this.emit(e),
+      );
+    } catch (error) {
+      // Purely a display concern — never let it stand between Claude and an edit.
+      console.error('[cockpit] diff render failed:', (error as Error).message);
+    }
+    return {};
   };
 
   private async start() {
@@ -217,6 +248,7 @@ class Session {
         includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         canUseTool: this.canUseTool,
+        hooks: { PreToolUse: [{ hooks: [this.preToolUse], timeout: 10 }] },
         maxTurns: 100,
       },
     });

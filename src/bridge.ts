@@ -31,6 +31,17 @@ export type CockpitBridge = {
     interrupt: (cwd: string) => Promise<void>;
     reset: (cwd: string) => Promise<void>;
   };
+  /**
+   * The app's own SQLite state, in the main process. Transcripts are kept as the
+   * `AgentEvent` stream rather than rendered markup, so a restored conversation
+   * survives any change to how the UI draws a turn.
+   */
+  store: {
+    transcript: (cwd: string) => Promise<AgentEvent[]>;
+    clearTranscript: (cwd: string) => Promise<void>;
+    selectedWorktree: () => Promise<string | null>;
+    setSelectedWorktree: (cwd: string | null) => Promise<void>;
+  };
 };
 
 declare global {

@@ -1,4 +1,5 @@
 import { monaco } from './monaco-env';
+import { renderMarkdown } from './markdown';
 import type { AgentEvent, EditOp, PlanItem, TodoItem } from './agent/protocol';
 
 const sleep = (ms: number) =>
@@ -17,10 +18,6 @@ const EDIT_BUDGET_MS = 6_000;
 /** Ceiling for all typing in one turn. Later edits snap in once it's spent. */
 const TURN_BUDGET_MS = 20_000;
 
-// Transcripts are persisted here (keyed by worktree) so a reload — Vite HMR or
-// a full nodemon restart — restores the chat instead of wiping it.
-const STORE = 'cockpit:transcript:';
-
 type Pos = { lineNumber: number; column: number };
 
 /** Where the caret lands after `text` is inserted at `pos`. */
@@ -37,8 +34,12 @@ type Pane = {
   el: HTMLElement;
   bubbleType: 'thinking' | 'say' | null;
   bubbleBody: HTMLElement | null;
+  /** Markdown source for the open bubble, re-rendered as deltas land. */
+  bubbleText: string;
   tools: Map<string, HTMLElement>;
   todos: HTMLElement | null;
+  /** Whether the stored transcript has been replayed into this pane yet. */
+  restored: boolean;
 };
 
 export class Cockpit {
@@ -51,9 +52,15 @@ export class Cockpit {
   private panes = new Map<string, Pane>();
   private pane: Pane;
 
+  /** Bubbles holding deltas that haven't been drawn yet. */
+  private dirty = new Set<Pane>();
+  /** Pending render frame, or 0 when nothing is scheduled. */
+  private frame = 0;
+
   private thoughts: monaco.editor.IModelDeltaDecoration[] = [];
   private thoughtCollection: monaco.editor.IEditorDecorationsCollection | null = null;
-  private persistTimer: number | null = null;
+  /** Serializes transcript replays against each other. */
+  private restoreQueue: Promise<void> = Promise.resolve();
 
   /**
    * Edits animate off the critical path: `handle` drops them on this queue and
@@ -100,16 +107,103 @@ export class Cockpit {
       const el = document.createElement('div');
       el.className = 'transcript';
       this.conversations.append(el);
-      pane = { key, el, bubbleType: null, bubbleBody: null, tools: new Map(), todos: null };
+      pane = {
+        key,
+        el,
+        bubbleType: null,
+        bubbleBody: null,
+        bubbleText: '',
+        tools: new Map(),
+        todos: null,
+        restored: false,
+      };
       this.panes.set(key, pane);
-      // Restore a persisted transcript so a reload keeps the chat.
-      const saved = localStorage.getItem(STORE + key);
-      if (saved) {
-        el.innerHTML = saved;
-        pane.todos = el.querySelector<HTMLElement>('.todos');
-      }
     }
     return pane;
+  }
+
+  /**
+   * Markdown renders from the bubble's whole source, because a delta that closes
+   * a fence or starts a list changes blocks already on screen. Per delta that
+   * would be a full innerHTML swap per token — enough to drop frames, and to
+   * drop any selection the reader is holding — so renders coalesce to one a
+   * frame, which is as often as the change could be seen anyway.
+   */
+  private scheduleRender(pane: Pane) {
+    this.dirty.add(pane);
+    this.frame ||= requestAnimationFrame(() => {
+      this.frame = 0;
+      for (const p of this.dirty) this.draw(p);
+      this.dirty.clear();
+      this.scrollDown();
+    });
+  }
+
+  private draw(pane: Pane) {
+    if (pane.bubbleBody) pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText);
+  }
+
+  /**
+   * End the open bubble, so whatever comes next starts a fresh one. Anything
+   * still pending is drawn first: a replay loop never yields to a frame, so the
+   * scheduled render might otherwise land after the bubble had been let go.
+   */
+  private closeBubble() {
+    if (this.dirty.delete(this.pane)) this.draw(this.pane);
+    this.pane.bubbleType = null;
+    this.pane.bubbleBody = null;
+    this.pane.bubbleText = '';
+  }
+
+  /** Drop a pane's drawn transcript and every live handle into it. */
+  private blankPane(pane: Pane) {
+    this.dirty.delete(pane);
+    pane.el.innerHTML = '';
+    pane.bubbleType = null;
+    pane.bubbleBody = null;
+    pane.bubbleText = '';
+    pane.tools.clear();
+    pane.todos = null;
+  }
+
+  /**
+   * Rebuild a worktree's transcript by replaying its stored events. Replaying
+   * the stream — rather than restoring saved markup — is what lets tool rows,
+   * todo lists and streaming bubbles come back as live objects the rest of the
+   * turn can still address by id.
+   */
+  restorePane(key: string): Promise<void> {
+    // Serial: two quick worktree clicks would otherwise interleave their draws.
+    const run = this.restoreQueue.then(() => this.replayInto(key));
+    this.restoreQueue = run.catch(() => {});
+    return run;
+  }
+
+  private async replayInto(key: string) {
+    const pane = this.paneFor(key);
+    if (pane.restored) return;
+    pane.restored = true;
+    const events = (await window.cockpit?.store.transcript(key)) ?? [];
+    if (!events.length) return;
+
+    // handle() draws into the active pane, so aim it at the one being restored.
+    const previous = this.pane;
+    this.pane = pane;
+    try {
+      for (const event of events) {
+        if (this.pane !== pane) {
+          // Switched away mid-replay. Drop the half-drawn transcript rather
+          // than leak the rest of it into whatever pane is active now; the
+          // next visit replays from the store cleanly.
+          this.blankPane(pane);
+          pane.restored = false;
+          return;
+        }
+        await this.handle(event, true);
+      }
+    } finally {
+      if (this.pane === pane) this.pane = previous;
+    }
   }
 
   /**
@@ -125,37 +219,17 @@ export class Cockpit {
   /** Clear one transcript (the model-side session is dropped separately). */
   clearPane(key: string) {
     const pane = this.paneFor(key);
-    pane.el.innerHTML = '';
-    pane.bubbleType = null;
-    pane.bubbleBody = null;
-    pane.tools.clear();
-    pane.todos = null;
-    localStorage.removeItem(STORE + key);
+    this.blankPane(pane);
+    pane.restored = true;
+    window.cockpit?.store.clearTranscript(key);
   }
 
   /** Full teardown of the visible transcript plus the diff surface. */
   reset() {
-    this.pane.el.innerHTML = '';
-    this.pane.bubbleType = null;
-    this.pane.bubbleBody = null;
-    this.pane.tools.clear();
-    this.pane.todos = null;
-    localStorage.removeItem(STORE + this.pane.key);
+    this.blankPane(this.pane);
+    this.pane.restored = true;
+    window.cockpit?.store.clearTranscript(this.pane.key);
     this.resetDiff();
-  }
-
-  /** Debounced snapshot of the active transcript to localStorage. */
-  private persist() {
-    const pane = this.pane;
-    if (this.persistTimer !== null) return;
-    this.persistTimer = window.setTimeout(() => {
-      this.persistTimer = null;
-      try {
-        localStorage.setItem(STORE + pane.key, pane.el.innerHTML);
-      } catch {
-        // quota or serialization failure — a lost transcript beats a crash
-      }
-    }, 200);
   }
 
   /** Queue diff work behind whatever is still typing, dropping stale generations. */
@@ -196,7 +270,11 @@ export class Cockpit {
     this.thoughtCollection = null;
   }
 
-  async handle(event: AgentEvent) {
+  /**
+   * Draw one event. `replaying` marks events coming back from the store rather
+   * than off a live run — same transcript, but nothing to animate.
+   */
+  async handle(event: AgentEvent, replaying = false) {
     switch (event.type) {
       case 'user':
         this.addUser(event.text);
@@ -219,8 +297,13 @@ export class Cockpit {
         break;
       case 'edit_start':
         // Break the transcript bubble now, in event order; the diff catches up.
-        this.pane.bubbleType = null;
-        this.enqueue(() => this.startEdit(event.file, event.language, event.original));
+        this.closeBubble();
+        // Stored transcripts keep this event for that break, but drop the file
+        // contents and the ops that followed — the diff pane is live-only
+        // state, so on replay there is nothing to type out.
+        if (!replaying) {
+          this.enqueue(() => this.startEdit(event.file, event.language, event.original));
+        }
         break;
       case 'edit_op':
         this.enqueue(() => this.applyEditOp(event.op));
@@ -232,14 +315,13 @@ export class Cockpit {
         });
         break;
       case 'error':
-        this.pane.bubbleType = null;
+        this.closeBubble();
         this.addMessage('error').textContent = `⚠ ${event.message}`;
         break;
       case 'done':
         this.endTurn(event.interrupted);
         break;
     }
-    this.persist();
   }
 
   private scrollDown() {
@@ -255,12 +337,12 @@ export class Cockpit {
   }
 
   private addUser(text: string) {
-    this.pane.bubbleType = null;
+    this.closeBubble();
     this.addMessage('user').textContent = text;
   }
 
   private startTool(id: string, name: string, summary: string) {
-    this.pane.bubbleType = null;
+    this.closeBubble();
     const row = this.addMessage('tool running');
     row.innerHTML = `
       <span class="tool-glyph"></span>
@@ -287,7 +369,7 @@ export class Cockpit {
    * on every status flip and appending each version would bury the transcript.
    */
   private renderTodos(items: TodoItem[]) {
-    this.pane.bubbleType = null;
+    this.closeBubble();
     if (!this.pane.todos) {
       this.pane.todos = this.addMessage('todos');
     }
@@ -316,7 +398,7 @@ export class Cockpit {
   private endTurn(interrupted?: boolean) {
     // Stop means stop: typing dumps its remaining text instead of playing on.
     if (interrupted) this.fastForward = true;
-    this.pane.bubbleType = null;
+    this.closeBubble();
     // Any tool still marked running was cut off — don't leave it spinning.
     for (const row of this.pane.tools.values()) {
       row.classList.remove('running');
@@ -330,6 +412,7 @@ export class Cockpit {
 
   private appendDelta(type: 'thinking' | 'say', text: string) {
     if (this.pane.bubbleType !== type || !this.pane.bubbleBody) {
+      this.closeBubble();
       const wrap = this.addMessage(type);
       if (type === 'thinking') {
         const label = document.createElement('div');
@@ -342,13 +425,14 @@ export class Cockpit {
       wrap.append(body);
       this.pane.bubbleType = type;
       this.pane.bubbleBody = body;
+      this.pane.bubbleText = '';
     }
-    this.pane.bubbleBody.textContent += text;
-    this.scrollDown();
+    this.pane.bubbleText += text;
+    this.scheduleRender(this.pane);
   }
 
   private async renderPlan(title: string, items: PlanItem[]) {
-    this.pane.bubbleType = null;
+    this.closeBubble();
     const wrap = this.addMessage('plan');
     const heading = document.createElement('div');
     heading.className = 'plan-title';

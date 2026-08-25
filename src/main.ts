@@ -69,8 +69,10 @@ const rail = new WorktreeRail(railBody, (wt) => {
   activeWorktree = wt;
   activeWtLabel.textContent = wt.name;
   activeWtLabel.classList.add('set');
-  // Each worktree keeps its own live session; show its transcript.
+  // Each worktree keeps its own live session; show its transcript, replaying
+  // the stored one the first time it's opened this run.
   cockpit.showPane(wt.path);
+  cockpit.restorePane(wt.path);
 });
 
 function showRailView(view: string) {

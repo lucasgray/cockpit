@@ -20,6 +20,13 @@ const bridge: CockpitBridge = {
     interrupt: (cwd: string) => ipcRenderer.invoke('agent:interrupt', cwd),
     reset: (cwd: string) => ipcRenderer.invoke('agent:reset', cwd),
   },
+  store: {
+    transcript: (cwd: string) => ipcRenderer.invoke('store:transcript', cwd),
+    clearTranscript: (cwd: string) => ipcRenderer.invoke('store:clearTranscript', cwd),
+    selectedWorktree: () => ipcRenderer.invoke('store:selectedWorktree'),
+    setSelectedWorktree: (cwd: string | null) =>
+      ipcRenderer.invoke('store:setSelectedWorktree', cwd),
+  },
 };
 
 contextBridge.exposeInMainWorld('cockpit', bridge);

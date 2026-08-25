@@ -374,7 +374,6 @@ body {
   font-style: italic;
   font-size: 13px;
   line-height: 1.55;
-  white-space: pre-wrap;
   padding-left: 10px;
   border-left: 2px solid var(--border-2);
 }
@@ -383,7 +382,129 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.6;
-  white-space: pre-wrap;
+}
+
+/*
+ * Rendered Markdown. Bubbles are laid out by the blocks inside them, so the
+ * first and last child give up their outer margin — otherwise every bubble
+ * carries padding the plain-text version never had.
+ */
+.msg .text > :first-child {
+  margin-top: 0;
+}
+
+.msg .text > :last-child {
+  margin-bottom: 0;
+}
+
+.msg .text p {
+  margin: 0 0 10px;
+}
+
+.msg .text h1,
+.msg .text h2,
+.msg .text h3,
+.msg .text h4,
+.msg .text h5,
+.msg .text h6 {
+  margin: 16px 0 8px;
+  font-size: 1em;
+  font-weight: 600;
+  color: #dfe3ec;
+}
+
+.msg .text h1,
+.msg .text h2 {
+  font-size: 1.08em;
+}
+
+.msg .text strong {
+  color: #dfe3ec;
+  font-weight: 600;
+}
+
+.msg .text del {
+  color: var(--dim-2);
+}
+
+.msg .text a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(197, 143, 224, 0.35);
+}
+
+.msg .text a:hover {
+  border-bottom-color: var(--accent);
+}
+
+.msg .text ul,
+.msg .text ol {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.msg .text li {
+  margin-bottom: 3px;
+}
+
+.msg .text li::marker {
+  color: var(--dim-2);
+}
+
+.msg .text blockquote {
+  margin: 0 0 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-2);
+  color: var(--dim);
+}
+
+.msg .text hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+
+.msg .text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  font-style: normal;
+  color: var(--accent-soft);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.msg .text pre.code {
+  margin: 0 0 10px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  overflow-x: auto;
+}
+
+/* Inside a block the border and tint belong to the <pre>, not each token. */
+.msg .text pre.code code {
+  display: block;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
+.msg .text pre.code[data-lang]::before {
+  content: attr(data-lang);
+  display: block;
+  margin-bottom: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--dim-2);
 }
 
 .msg.error {

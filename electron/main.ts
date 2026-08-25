@@ -2,8 +2,10 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult } from '../src/bridge';
 import { closeAllAgents, interruptAgent, resetAgent, runAgent } from './agentRunner';
+import { getStore, openStore } from './store';
 
 const execFileAsync = promisify(execFile);
 
@@ -114,15 +116,35 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // The app's own state lives beside the app, never in the repo being worked on.
+  openStore(app.getPath('userData'));
+
   ipcMain.handle('worktrees:list', () => listWorktrees());
   ipcMain.handle('worktrees:create', (_event, branch: string) => createWorktree(branch));
   ipcMain.handle(
     'agent:run',
-    (event, req: { prompt: string; cwd: string; runId: string }) =>
-      runAgent(req, (agentEvent) => event.sender.send(`agent:event:${req.runId}`, agentEvent)),
+    (event, req: { prompt: string; cwd: string; runId: string }) => {
+      const store = getStore();
+      // The renderer echoes the prompt for immediate feedback, but the stored
+      // transcript is written here — so record it too, or a restored
+      // conversation would come back as Claude talking to nobody.
+      store.appendEvent(req.cwd, { type: 'user', text: req.prompt });
+      return runAgent(req, (agentEvent: AgentEvent) => {
+        store.appendEvent(req.cwd, agentEvent);
+        event.sender.send(`agent:event:${req.runId}`, agentEvent);
+      });
+    },
   );
   ipcMain.handle('agent:interrupt', (_event, cwd: string) => interruptAgent(cwd));
   ipcMain.handle('agent:reset', (_event, cwd: string) => resetAgent(cwd));
+
+  ipcMain.handle('store:transcript', (_event, cwd: string) => getStore().transcript(cwd));
+  ipcMain.handle('store:clearTranscript', (_event, cwd: string) => getStore().clearTranscript(cwd));
+  ipcMain.handle('store:selectedWorktree', () => getStore().selectedWorktree());
+  ipcMain.handle('store:setSelectedWorktree', (_event, cwd: string | null) =>
+    getStore().setSelectedWorktree(cwd),
+  );
+
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -139,5 +161,7 @@ app.on('before-quit', (event) => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
-  closeAllAgents().finally(() => app.quit());
+  closeAllAgents()
+    .finally(() => getStore().close())
+    .finally(() => app.quit());
 });
