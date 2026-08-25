@@ -18,14 +18,9 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div class="brand">
         <span class="dot"></span>
         Cockpit
-        <span class="tag">toy</span>
       </div>
       <span class="active-wt" id="active-wt">no worktree</span>
       <div class="spacer"></div>
-      <input id="prompt" class="prompt" placeholder="Ask the agent to change ${sampleFile.path}…" />
-      <button id="send" class="btn primary">Send</button>
-      <button id="stop" class="btn danger" hidden>■ Stop</button>
-      <button id="new" class="btn" title="Drop this worktree's session and start over">＋ New</button>
       <button id="run" class="btn">▶ Demo</button>
     </header>
     <main class="body">
@@ -36,7 +31,20 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         </div>
         <div class="rail-body" id="rail-body"></div>
       </aside>
-      <section class="conversation" id="conversation"></section>
+      <section class="conversation">
+        <div class="transcripts" id="conversation"></div>
+        <div class="composer">
+          <textarea id="prompt" class="prompt" rows="3"></textarea>
+          <div class="composer-actions">
+            <button id="new" class="btn subtle" title="Drop this worktree's session and start over">
+              ＋ New
+            </button>
+            <div class="spacer"></div>
+            <button id="stop" class="btn danger" hidden>■ Stop</button>
+            <button id="send" class="btn primary">Send</button>
+          </div>
+        </div>
+      </section>
       <section class="workspace">
         <div class="tabs" id="tabs"></div>
         <div class="diff" id="diff"></div>
@@ -51,7 +59,7 @@ const runBtn = document.getElementById('run') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const newBtn = document.getElementById('new') as HTMLButtonElement;
-const promptInput = document.getElementById('prompt') as HTMLInputElement;
+const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
 const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 const railBody = document.getElementById('rail-body') as HTMLElement;
 
@@ -61,7 +69,6 @@ const rail = new WorktreeRail(railBody, (wt) => {
   activeWorktree = wt;
   activeWtLabel.textContent = wt.name;
   activeWtLabel.classList.add('set');
-  promptInput.placeholder = `Ask Claude to work in ${wt.name}…`;
   // Each worktree keeps its own live session; show its transcript.
   cockpit.showPane(wt.path);
 });
@@ -169,5 +176,9 @@ async function sendPrompt() {
 
 sendBtn.addEventListener('click', sendPrompt);
 promptInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendPrompt();
+  // Enter sends; Shift+Enter drops a newline into the box.
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendPrompt();
+  }
 });

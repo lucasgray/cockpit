@@ -1,5 +1,25 @@
 import type { Worktree } from './bridge';
 
+/** Survives reloads and app restarts so the rail comes back where you left it. */
+const SELECTED_KEY = 'cockpit.selectedWorktree';
+
+function readStoredPath(): string | null {
+  try {
+    return localStorage.getItem(SELECTED_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPath(path: string | null) {
+  try {
+    if (path === null) localStorage.removeItem(SELECTED_KEY);
+    else localStorage.setItem(SELECTED_KEY, path);
+  } catch {
+    // Private mode / storage disabled — selection just won't persist.
+  }
+}
+
 export class WorktreeRail {
   private container: HTMLElement;
   private onSelect: (wt: Worktree) => void;
@@ -19,10 +39,26 @@ export class WorktreeRail {
     this.container.innerHTML = `<div class="rail-note">Loading worktrees…</div>`;
     try {
       this.worktrees = await window.cockpit.worktrees.list();
+      this.restoreSelection();
       this.render();
     } catch (error) {
       this.container.innerHTML = `<div class="rail-note">⚠ ${String(error)}</div>`;
     }
+  }
+
+  /** Re-select the worktree from the last session, once its path still exists. */
+  private restoreSelection() {
+    if (this.activePath && this.worktrees.some((wt) => wt.path === this.activePath)) return;
+    const stored = readStoredPath();
+    if (!stored) return;
+    const wt = this.worktrees.find((candidate) => candidate.path === stored);
+    if (!wt) {
+      // The worktree was removed since last run; don't keep chasing it.
+      writeStoredPath(null);
+      return;
+    }
+    this.activePath = wt.path;
+    this.onSelect(wt);
   }
 
   /** Re-read git state (dirty flags, new branches) without dropping selection. */
@@ -50,6 +86,7 @@ export class WorktreeRail {
         <div class="wt-branch">${wt.branch}</div>`;
       item.addEventListener('click', () => {
         this.activePath = wt.path;
+        writeStoredPath(wt.path);
         this.render();
         this.onSelect(wt);
       });

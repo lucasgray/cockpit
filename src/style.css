@@ -48,7 +48,6 @@ body {
 }
 
 .topbar .btn,
-.topbar .prompt,
 .topbar .active-wt {
   -webkit-app-region: no-drag;
 }
@@ -67,16 +66,6 @@ body {
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 10px 1px rgba(197, 143, 224, 0.55);
-}
-
-.brand .tag {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--dim);
-  border: 1px solid var(--border-2);
-  border-radius: 999px;
-  padding: 1px 7px;
 }
 
 .active-wt {
@@ -98,9 +87,11 @@ body {
 }
 
 .prompt {
-  width: 320px;
+  display: block;
+  width: 100%;
   font: inherit;
   font-size: 13px;
+  line-height: 1.5;
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border-2);
@@ -108,6 +99,10 @@ body {
   padding: 7px 11px;
   outline: none;
   transition: border-color 0.15s;
+  /* Three lines by default; drag the corner for more. */
+  resize: vertical;
+  min-height: calc(3 * 1.5em + 16px);
+  max-height: 40vh;
 }
 
 .prompt::placeholder {
@@ -138,6 +133,17 @@ body {
 .btn.primary {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.btn.subtle {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+}
+
+.btn.subtle:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--border-2);
 }
 
 .btn:disabled {
@@ -273,10 +279,41 @@ body {
 .conversation {
   border-right: 1px solid var(--border);
   background: var(--bg);
-  overflow-y: auto;
-  padding: 18px 16px 40px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+}
+
+.transcripts {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 16px 24px;
+}
+
+/* Panes stay mounted so a worktree swap never loses an in-flight turn. */
+.transcript {
+  display: none;
+  flex-direction: column;
+}
+
+.transcript.visible {
+  display: flex;
+}
+
+.composer {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .msg {

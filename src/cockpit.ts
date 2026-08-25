@@ -4,11 +4,32 @@ import type { AgentEvent, EditOp, PlanItem, TodoItem } from './agent/protocol';
 const sleep = (ms: number) =>
   document.hidden ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Typewriter pacing. One tick is roughly one frame; the chunk size — how many
+ * characters land per tick — scales up so a big edit still finishes on time.
+ * Past MAX_CHUNK the effect stops reading as typing and starts reading as
+ * stuttering, so an edit that would need a bigger chunk is applied whole.
+ */
+const TICK_MS = 16;
+const MAX_CHUNK = 24;
+/** Ceiling for any single edit, so one huge rewrite can't hog the turn. */
+const EDIT_BUDGET_MS = 6_000;
+/** Ceiling for all typing in one turn. Later edits snap in once it's spent. */
+const TURN_BUDGET_MS = 20_000;
+
 // Transcripts are persisted here (keyed by worktree) so a reload — Vite HMR or
 // a full nodemon restart — restores the chat instead of wiping it.
 const STORE = 'cockpit:transcript:';
 
 type Pos = { lineNumber: number; column: number };
+
+/** Where the caret lands after `text` is inserted at `pos`. */
+function advance(pos: Pos, text: string): Pos {
+  const lastBreak = text.lastIndexOf('\n');
+  if (lastBreak === -1) return { lineNumber: pos.lineNumber, column: pos.column + text.length };
+  const breaks = text.length - text.replaceAll('\n', '').length;
+  return { lineNumber: pos.lineNumber + breaks, column: text.length - lastBreak };
+}
 
 /** Per-conversation scroll + streaming state, so panes can be swapped intact. */
 type Pane = {
@@ -33,6 +54,21 @@ export class Cockpit {
   private thoughts: monaco.editor.IModelDeltaDecoration[] = [];
   private thoughtCollection: monaco.editor.IEditorDecorationsCollection | null = null;
   private persistTimer: number | null = null;
+
+  /**
+   * Edits animate off the critical path: `handle` drops them on this queue and
+   * returns, so thinking, tool rows and the rest of the turn keep streaming in
+   * while the diff types itself out. The queue is serial — ops still land in
+   * the order the agent emitted them.
+   */
+  private editQueue: Promise<void> = Promise.resolve();
+  /** Bumped whenever the diff is torn down; in-flight typing checks it and bails. */
+  private editGen = 0;
+  private turnBudget = TURN_BUDGET_MS;
+  /** Set on interrupt — typing dumps the rest of its text and stops. */
+  private fastForward = false;
+  /** Whether the current edit was too big to type, for the status line. */
+  private appliedWhole = false;
 
   constructor() {
     this.conversations = document.getElementById('conversation')!;
@@ -122,7 +158,35 @@ export class Cockpit {
     }, 200);
   }
 
+  /** Queue diff work behind whatever is still typing, dropping stale generations. */
+  private enqueue(work: () => Promise<void> | void) {
+    const gen = this.editGen;
+    this.editQueue = this.editQueue
+      .then(() => {
+        if (gen !== this.editGen) return;
+        return work();
+      })
+      .catch(() => {
+        // A disposed model or a torn-down editor — the next edit starts clean.
+      });
+  }
+
+  /**
+   * Resolve once the diff has stopped moving. A turn isn't really over while
+   * its last edit is still unspooling; the budgets bound how long this waits.
+   */
+  async settleEdits() {
+    let seen: Promise<void> | null = null;
+    while (seen !== this.editQueue) {
+      seen = this.editQueue;
+      await seen;
+    }
+  }
+
   resetDiff() {
+    this.editGen++;
+    this.turnBudget = TURN_BUDGET_MS;
+    this.fastForward = false;
     this.tabs.innerHTML = '';
     this.status.textContent = '';
     this.diffEditor.setModel(null);
@@ -154,13 +218,18 @@ export class Cockpit {
         this.renderTodos(event.items);
         break;
       case 'edit_start':
-        this.startEdit(event.file, event.language, event.original);
+        // Break the transcript bubble now, in event order; the diff catches up.
+        this.pane.bubbleType = null;
+        this.enqueue(() => this.startEdit(event.file, event.language, event.original));
         break;
       case 'edit_op':
-        await this.applyEditOp(event.op);
+        this.enqueue(() => this.applyEditOp(event.op));
         break;
       case 'edit_end':
-        this.status.textContent = this.status.textContent.replace('✎ editing', '✓ edited');
+        this.enqueue(() => {
+          const done = this.status.textContent.replace('✎ editing', '✓ edited');
+          this.status.textContent = this.appliedWhole ? `${done} · applied at once` : done;
+        });
         break;
       case 'error':
         this.pane.bubbleType = null;
@@ -245,6 +314,8 @@ export class Cockpit {
   }
 
   private endTurn(interrupted?: boolean) {
+    // Stop means stop: typing dumps its remaining text instead of playing on.
+    if (interrupted) this.fastForward = true;
     this.pane.bubbleType = null;
     // Any tool still marked running was cut off — don't leave it spinning.
     for (const row of this.pane.tools.values()) {
@@ -304,7 +375,7 @@ export class Cockpit {
   }
 
   private startEdit(file: string, language: string, original: string) {
-    this.pane.bubbleType = null;
+    this.appliedWhole = false;
     this.tabs.innerHTML = '';
     const tab = document.createElement('div');
     tab.className = 'tab active';
@@ -345,14 +416,15 @@ export class Cockpit {
   ): Promise<number> {
     switch (op.kind) {
       case 'setContent': {
-        model.setValue(op.text);
+        model.setValue('');
         editor.revealLine(1);
+        await this.write(editor, model, { lineNumber: 1, column: 1 }, op.text);
         return 1;
       }
       case 'append': {
         const line = model.getLineCount();
         const column = model.getLineMaxColumn(line);
-        await this.typeAt(editor, model, { lineNumber: line, column }, `\n${op.text}`);
+        await this.write(editor, model, { lineNumber: line, column }, `\n${op.text}`);
         return line + 1;
       }
       case 'replaceString': {
@@ -361,7 +433,7 @@ export class Cockpit {
         if (idx === -1) {
           const line = model.getLineCount();
           const column = model.getLineMaxColumn(line);
-          await this.typeAt(editor, model, { lineNumber: line, column }, `\n${op.replace}`);
+          await this.write(editor, model, { lineNumber: line, column }, `\n${op.replace}`);
           return line + 1;
         }
         const start = model.getPositionAt(idx);
@@ -369,14 +441,14 @@ export class Cockpit {
         model.applyEdits([
           { range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column), text: '' },
         ]);
-        await this.typeAt(editor, model, { lineNumber: start.lineNumber, column: start.column }, op.replace);
+        await this.write(editor, model, { lineNumber: start.lineNumber, column: start.column }, op.replace);
         return start.lineNumber;
       }
       case 'insertAfter': {
         const anchorLine = this.findAnchor(model, op.anchor);
         if (anchorLine === -1) return -1;
         const column = model.getLineMaxColumn(anchorLine);
-        await this.typeAt(editor, model, { lineNumber: anchorLine, column }, `\n${op.text}`);
+        await this.write(editor, model, { lineNumber: anchorLine, column }, `\n${op.text}`);
         return anchorLine + (op.text.startsWith('\n') ? 2 : 1);
       }
       case 'replaceLine': {
@@ -384,30 +456,63 @@ export class Cockpit {
         if (anchorLine === -1) return -1;
         const maxColumn = model.getLineMaxColumn(anchorLine);
         model.applyEdits([{ range: new monaco.Range(anchorLine, 1, anchorLine, maxColumn), text: '' }]);
-        await this.typeAt(editor, model, { lineNumber: anchorLine, column: 1 }, op.text);
+        await this.write(editor, model, { lineNumber: anchorLine, column: 1 }, op.text);
         return anchorLine;
       }
     }
   }
 
-  private async typeAt(
+  /**
+   * How many characters to land per tick for an insert of `chars`, or null when
+   * there's no way to show it as typing inside the budget. Small edits get one
+   * character a tick — the familiar cadence; bigger ones speed up until the
+   * chunk would be too coarse to read, at which point the caller drops the text
+   * in whole rather than making anyone sit through it.
+   */
+  private chunkFor(chars: number): number | null {
+    const budget = Math.min(EDIT_BUDGET_MS, this.turnBudget);
+    if (budget < TICK_MS * 4) return null;
+    const chunk = Math.ceil(chars / Math.floor(budget / TICK_MS));
+    return chunk > MAX_CHUNK ? null : chunk;
+  }
+
+  /** Insert `text` at `pos` — typed out when it fits the budget, instant when not. */
+  private async write(
     editor: monaco.editor.ICodeEditor,
     model: monaco.editor.ITextModel,
-    start: Pos,
+    pos: Pos,
     text: string,
   ) {
-    let pos: Pos = { ...start };
-    for (const ch of text) {
-      model.applyEdits([
-        { range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text: ch },
-      ]);
-      pos =
-        ch === '\n'
-          ? { lineNumber: pos.lineNumber + 1, column: 1 }
-          : { lineNumber: pos.lineNumber, column: pos.column + 1 };
+    const chunk = this.chunkFor(text.length);
+    if (chunk === null) {
+      this.appliedWhole = true;
+      this.insert(model, pos, text);
       editor.revealLineInCenterIfOutsideViewport(pos.lineNumber);
-      await sleep(14);
+      return;
     }
+
+    const gen = this.editGen;
+    const started = performance.now();
+    let at = { ...pos };
+    for (let i = 0; i < text.length; i += chunk) {
+      if (gen !== this.editGen || model.isDisposed()) return;
+      if (this.fastForward) {
+        this.insert(model, at, text.slice(i));
+        break;
+      }
+      const slice = text.slice(i, i + chunk);
+      this.insert(model, at, slice);
+      at = advance(at, slice);
+      editor.revealLineInCenterIfOutsideViewport(at.lineNumber);
+      await sleep(TICK_MS);
+    }
+    this.turnBudget -= performance.now() - started;
+  }
+
+  private insert(model: monaco.editor.ITextModel, pos: Pos, text: string) {
+    model.applyEdits([
+      { range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text },
+    ]);
   }
 
   private pinThought(model: monaco.editor.ITextModel, line: number, note: string) {
@@ -442,4 +547,6 @@ export async function runStream(
     await ui.handle(event);
     if (event.type === 'done') break;
   }
+  // Events are done, but the diff may still be typing the last edit out.
+  await ui.settleEdits();
 }
