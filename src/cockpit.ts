@@ -280,20 +280,15 @@ export class Cockpit {
     this.thoughtCollection = null;
   }
 
-  /** The reliable "what changed" view: a worktree's unified git diff. */
+  /**
+   * The reliable "what changed" view: a worktree's unified git diff. Only the
+   * contents — which pane is on screen belongs to the workspace switcher in
+   * main.ts, so the two can't disagree about what's visible.
+   */
   async showChanges(diff: string) {
-    const changes = document.getElementById('changes')!;
-    changes.innerHTML = diff.trim()
+    document.getElementById('changes')!.innerHTML = diff.trim()
       ? await monaco.editor.colorize(diff, 'diff', {})
       : '<div class="changes-empty">No uncommitted changes in this worktree.</div>';
-    document.getElementById('diff')!.style.display = 'none';
-    changes.hidden = false;
-  }
-
-  /** Back to the live typewriter diff of the current turn. */
-  showLive() {
-    document.getElementById('changes')!.hidden = true;
-    document.getElementById('diff')!.style.display = '';
   }
 
   /**

@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
 import { answerAgent, closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
+import { listDir, readFileContents, writeFileContents } from './files';
 import {
   closeRun,
   detectRunCommand,
@@ -178,6 +179,20 @@ async function worktreeStat(cwd: string): Promise<{ added: number; removed: numb
   return { added, removed };
 }
 
+/**
+ * Worktree paths from the most recent listing. This is the allowlist the file
+ * API checks against: the renderer can name a root, but only one the cockpit
+ * has actually seen git report.
+ */
+const knownWorktrees = new Set<string>();
+
+async function worktreeRoot(cwd: string): Promise<string> {
+  // A worktree made since the last listing deserves one refresh before a refusal.
+  if (!knownWorktrees.has(cwd)) await listWorktrees();
+  if (!knownWorktrees.has(cwd)) throw new Error(`Not a worktree of this project: ${cwd}`);
+  return cwd;
+}
+
 async function listWorktrees(): Promise<Worktree[]> {
   const out = await git(PROJECT_ROOT, ['worktree', 'list', '--porcelain']);
   const blocks = out.trim().split('\n\n');
@@ -223,6 +238,9 @@ async function listWorktrees(): Promise<Worktree[]> {
       serving: serving.has(wtPath),
     });
   }
+
+  knownWorktrees.clear();
+  for (const wt of worktrees) knownWorktrees.add(wt.path);
   return worktrees;
 }
 
@@ -326,6 +344,19 @@ app.whenReady().then(() => {
       answerAgent(req.cwd, req.id, req.selection),
   );
 
+  // Every file call proves its root is a known worktree before it touches disk.
+  ipcMain.handle('files:list', async (_event, cwd: string, dir: string) =>
+    listDir(await worktreeRoot(cwd), dir),
+  );
+  ipcMain.handle('files:read', async (_event, cwd: string, file: string) =>
+    readFileContents(await worktreeRoot(cwd), file),
+  );
+  ipcMain.handle(
+    'files:write',
+    async (_event, req: { cwd: string; path: string; text: string; mtime: number }) =>
+      writeFileContents(await worktreeRoot(req.cwd), req.path, req.text, req.mtime),
+  );
+
   ipcMain.handle('run:detect', (_event, cwd: string) => detectRunCommand(cwd));
   ipcMain.handle('run:start', (_event, cwd: string, command?: string) => startRun(cwd, command));
   ipcMain.handle('run:stop', (_event, cwd: string) => stopRun(cwd));
@@ -338,6 +369,12 @@ app.whenReady().then(() => {
   ipcMain.handle('store:setSelectedWorktree', (_event, cwd: string | null) =>
     getStore().setSelectedWorktree(cwd),
   );
+  ipcMain.handle('store:openFile', (_event, cwd: string) => getStore().openFile(cwd));
+  ipcMain.handle('store:setOpenFile', (_event, cwd: string, file: string | null) =>
+    getStore().setOpenFile(cwd, file),
+  );
+  ipcMain.handle('store:railView', () => getStore().railView());
+  ipcMain.handle('store:setRailView', (_event, view: string) => getStore().setRailView(view));
   ipcMain.handle('store:settings', () => getStore().settings());
   ipcMain.handle('store:saveSettings', (_event, patch: Partial<CockpitSettings>) =>
     getStore().saveSettings(patch),

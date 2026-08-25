@@ -32,6 +32,12 @@ const bridge: CockpitBridge = {
     answer: (cwd: string, id: string, selection: string) =>
       ipcRenderer.invoke('agent:answer', { cwd, id, selection }),
   },
+  files: {
+    list: (cwd: string, dir: string) => ipcRenderer.invoke('files:list', cwd, dir),
+    read: (cwd: string, path: string) => ipcRenderer.invoke('files:read', cwd, path),
+    write: (cwd: string, path: string, text: string, mtime: number) =>
+      ipcRenderer.invoke('files:write', { cwd, path, text, mtime }),
+  },
   run: {
     detect: (cwd: string) => ipcRenderer.invoke('run:detect', cwd),
     start: (cwd: string, command?: string) => ipcRenderer.invoke('run:start', cwd, command),
@@ -52,6 +58,11 @@ const bridge: CockpitBridge = {
     selectedWorktree: () => ipcRenderer.invoke('store:selectedWorktree'),
     setSelectedWorktree: (cwd: string | null) =>
       ipcRenderer.invoke('store:setSelectedWorktree', cwd),
+    openFile: (cwd: string) => ipcRenderer.invoke('store:openFile', cwd),
+    setOpenFile: (cwd: string, path: string | null) =>
+      ipcRenderer.invoke('store:setOpenFile', cwd, path),
+    railView: () => ipcRenderer.invoke('store:railView'),
+    setRailView: (view: string) => ipcRenderer.invoke('store:setRailView', view),
     settings: () => ipcRenderer.invoke('store:settings'),
     saveSettings: (patch: Partial<CockpitSettings>) =>
       ipcRenderer.invoke('store:saveSettings', patch),
