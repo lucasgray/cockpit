@@ -110,9 +110,34 @@ function parseTodos(input: Record<string, unknown>): TodoItem[] {
   });
 }
 
-/** Pull a short result line out of a tool_result content block. */
+/** Cap a string for transport without flattening its newlines (unlike clip). */
+function cap(text: string, max = 4000): string {
+  const t = text.replace(/\s+$/, '');
+  return t.length > max ? `${t.slice(0, max)}\n… (truncated)` : t;
+}
+
+/**
+ * The full, newline-preserving tool input for the expandable row body — the raw
+ * Bash command, or a readable dump of a structured tool's arguments. Read/edit
+ * tools return '' because their work is shown elsewhere (the diff pane).
+ */
+function toolDetail(name: string, input: Record<string, unknown>): string {
+  switch (name) {
+    case 'Bash':
+      return cap(String(input.command ?? ''));
+    case 'Read':
+    case 'Edit':
+    case 'Write':
+    case 'MultiEdit':
+      return '';
+    default:
+      return cap(JSON.stringify(input, null, 2));
+  }
+}
+
+/** The tool's output for the expandable row body — full text, newlines intact. */
 function resultDetail(content: unknown): string {
-  if (typeof content === 'string') return clip(content, 100);
+  if (typeof content === 'string') return cap(content);
   if (Array.isArray(content)) {
     const text = content
       .filter((b): b is { type: 'text'; text: string } => {
@@ -120,8 +145,8 @@ function resultDetail(content: unknown): string {
         return block.type === 'text';
       })
       .map((b) => b.text)
-      .join(' ');
-    return clip(text, 100);
+      .join('\n');
+    return cap(text);
   }
   return '';
 }
@@ -293,6 +318,7 @@ class Session {
             id: block.id,
             name: block.name,
             summary: summarizeTool(block.name, input, this.cwd),
+            detail: toolDetail(block.name, input),
           });
         }
         continue;

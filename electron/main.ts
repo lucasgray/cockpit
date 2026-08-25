@@ -60,6 +60,33 @@ async function createWorktree(branch: string): Promise<WorktreeCreateResult> {
   return { ok: true, path: dir, branch: name };
 }
 
+/** Run git and return stdout even on a non-zero exit (diff exits 1 on changes). */
+async function gitOut(cwd: string, args: string[]): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 8 * 1024 * 1024 });
+    return stdout;
+  } catch (error) {
+    const stdout = (error as { stdout?: string }).stdout;
+    return typeof stdout === 'string' ? stdout : '';
+  }
+}
+
+/**
+ * A unified diff of everything the agent changed in a worktree since its last
+ * commit: tracked edits via `git diff HEAD`, plus each new untracked file diffed
+ * against /dev/null so created files show up too.
+ */
+async function worktreeDiff(cwd: string): Promise<string> {
+  let out = await gitOut(cwd, ['--no-pager', 'diff', 'HEAD']);
+  const untracked = (await gitOut(cwd, ['ls-files', '--others', '--exclude-standard'])).trim();
+  if (untracked) {
+    for (const file of untracked.split('\n').filter(Boolean).slice(0, 50)) {
+      out += `\n${await gitOut(cwd, ['--no-pager', 'diff', '--no-index', '--', '/dev/null', file])}`;
+    }
+  }
+  return out.trim();
+}
+
 async function listWorktrees(): Promise<Worktree[]> {
   const out = await git(PROJECT_ROOT, ['worktree', 'list', '--porcelain']);
   const blocks = out.trim().split('\n\n');
@@ -121,6 +148,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('worktrees:list', () => listWorktrees());
   ipcMain.handle('worktrees:create', (_event, branch: string) => createWorktree(branch));
+  ipcMain.handle('worktrees:diff', (_event, cwd: string) => worktreeDiff(cwd));
   ipcMain.handle(
     'agent:run',
     (event, req: { prompt: string; cwd: string; runId: string }) => {

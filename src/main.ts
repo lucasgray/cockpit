@@ -46,8 +46,15 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         </div>
       </section>
       <section class="workspace">
-        <div class="tabs" id="tabs"></div>
+        <div class="ws-head">
+          <div class="tabs" id="tabs"></div>
+          <div class="ws-toggle">
+            <button id="view-live" class="ws-tab active">Live</button>
+            <button id="view-changes" class="ws-tab">Changes</button>
+          </div>
+        </div>
         <div class="diff" id="diff"></div>
+        <div class="changes" id="changes" hidden></div>
         <div class="statusline" id="status"></div>
       </section>
     </main>
@@ -73,6 +80,26 @@ const rail = new WorktreeRail(railBody, (wt) => {
   // the stored one the first time it's opened this run.
   cockpit.showPane(wt.path);
   cockpit.restorePane(wt.path);
+});
+
+const viewLiveBtn = document.getElementById('view-live') as HTMLButtonElement;
+const viewChangesBtn = document.getElementById('view-changes') as HTMLButtonElement;
+
+function setWorkspaceView(view: 'live' | 'changes') {
+  viewLiveBtn.classList.toggle('active', view === 'live');
+  viewChangesBtn.classList.toggle('active', view === 'changes');
+}
+
+viewLiveBtn.addEventListener('click', () => {
+  setWorkspaceView('live');
+  cockpit.showLive();
+});
+
+viewChangesBtn.addEventListener('click', async () => {
+  setWorkspaceView('changes');
+  const cwd = activeWorktree?.path;
+  const diff = cwd && window.cockpit ? await window.cockpit.worktrees.diff(cwd) : '';
+  await cockpit.showChanges(diff);
 });
 
 function showRailView(view: string) {

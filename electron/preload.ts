@@ -6,6 +6,7 @@ const bridge: CockpitBridge = {
   worktrees: {
     list: () => ipcRenderer.invoke('worktrees:list'),
     create: (branch: string) => ipcRenderer.invoke('worktrees:create', branch),
+    diff: (cwd: string) => ipcRenderer.invoke('worktrees:diff', cwd),
   },
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => {

@@ -20,7 +20,7 @@ export type AgentEvent =
   | { type: 'thinking'; text: string }
   | { type: 'say'; text: string }
   | { type: 'plan'; title: string; items: PlanItem[] }
-  | { type: 'tool_start'; id: string; name: string; summary: string }
+  | { type: 'tool_start'; id: string; name: string; summary: string; detail?: string }
   | { type: 'tool_end'; id: string; ok: boolean; detail?: string }
   | { type: 'todos'; items: TodoItem[] }
   | { type: 'edit_start'; file: string; language: string; original: string }

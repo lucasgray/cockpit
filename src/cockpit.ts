@@ -270,6 +270,22 @@ export class Cockpit {
     this.thoughtCollection = null;
   }
 
+  /** The reliable "what changed" view: a worktree's unified git diff. */
+  async showChanges(diff: string) {
+    const changes = document.getElementById('changes')!;
+    changes.innerHTML = diff.trim()
+      ? await monaco.editor.colorize(diff, 'diff', {})
+      : '<div class="changes-empty">No uncommitted changes in this worktree.</div>';
+    document.getElementById('diff')!.style.display = 'none';
+    changes.hidden = false;
+  }
+
+  /** Back to the live typewriter diff of the current turn. */
+  showLive() {
+    document.getElementById('changes')!.hidden = true;
+    document.getElementById('diff')!.style.display = '';
+  }
+
   /**
    * Draw one event. `replaying` marks events coming back from the store rather
    * than off a live run — same transcript, but nothing to animate.
@@ -287,7 +303,7 @@ export class Cockpit {
         await this.renderPlan(event.title, event.items);
         break;
       case 'tool_start':
-        this.startTool(event.id, event.name, event.summary);
+        this.startTool(event.id, event.name, event.summary, event.detail);
         break;
       case 'tool_end':
         this.endTool(event.id, event.ok, event.detail);
@@ -341,16 +357,33 @@ export class Cockpit {
     this.addMessage('user').textContent = text;
   }
 
-  private startTool(id: string, name: string, summary: string) {
+  private startTool(id: string, name: string, summary: string, detail?: string) {
     this.closeBubble();
     const row = this.addMessage('tool running');
-    row.innerHTML = `
-      <span class="tool-glyph"></span>
-      <span class="tool-name"></span>
-      <span class="tool-summary"></span>
-      <span class="tool-detail"></span>`;
-    row.querySelector('.tool-name')!.textContent = name;
-    row.querySelector('.tool-summary')!.textContent = summary;
+
+    const head = document.createElement('div');
+    head.className = 'tool-head';
+    head.innerHTML =
+      '<span class="tool-glyph"></span><span class="tool-name"></span>' +
+      '<span class="tool-summary"></span><span class="tool-caret"></span>';
+    head.querySelector('.tool-name')!.textContent = name;
+    head.querySelector('.tool-summary')!.textContent = summary;
+
+    const body = document.createElement('div');
+    body.className = 'tool-body';
+    if (detail) {
+      const cmd = document.createElement('pre');
+      cmd.className = 'tool-cmd';
+      cmd.textContent = detail;
+      body.append(cmd);
+    }
+
+    row.append(head, body);
+    // The whole head toggles the body — but only once there's something in it.
+    head.addEventListener('click', () => {
+      if (body.childElementCount > 0) row.classList.toggle('expanded');
+    });
+    this.syncToolBody(row);
     this.pane.tools.set(id, row);
   }
 
@@ -360,8 +393,20 @@ export class Cockpit {
     this.pane.tools.delete(id);
     row.classList.remove('running');
     row.classList.add(ok ? 'ok' : 'failed');
-    if (detail) row.querySelector('.tool-detail')!.textContent = detail;
+    if (detail) {
+      const out = document.createElement('pre');
+      out.className = 'tool-out';
+      out.textContent = detail;
+      row.querySelector('.tool-body')!.append(out);
+    }
+    this.syncToolBody(row);
     this.scrollDown();
+  }
+
+  /** Show the caret/pointer only when the row actually has an expandable body. */
+  private syncToolBody(row: HTMLElement) {
+    const body = row.querySelector('.tool-body');
+    row.classList.toggle('has-body', !!body && body.childElementCount > 0);
   }
 
   /**

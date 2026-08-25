@@ -25,6 +25,8 @@ export type CockpitBridge = {
   worktrees: {
     list: () => Promise<Worktree[]>;
     create: (branch: string) => Promise<WorktreeCreateResult>;
+    /** Unified `git diff` of the worktree's uncommitted changes (+ new files). */
+    diff: (cwd: string) => Promise<string>;
   };
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;
