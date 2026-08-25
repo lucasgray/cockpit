@@ -97,6 +97,8 @@ const rail = new WorktreeRail(
     cockpit.showPane(wt.path);
     cockpit.restorePane(wt.path);
     void runPane.setWorktree(wt);
+    // Send/Stop speak for the selected worktree — refresh them on every switch.
+    updateSendStop();
     // Picking a worktree is the start of typing at it — go straight to the box.
     promptInput.focus();
   },
@@ -108,6 +110,7 @@ const rail = new WorktreeRail(
       cockpit.resetDiff();
       // The directory is gone; its run went with it in removeWorktree.
       void runPane.setWorktree(null);
+      updateSendStop();
     }
     cockpit.dropPane(path);
   },
@@ -191,56 +194,80 @@ document.querySelectorAll<HTMLButtonElement>('.rail-tab').forEach((tab) =>
 );
 
 rail.load();
+updateSendStop();
 
-let running = false;
-/** The worktree whose turn is in flight — what ■ Stop interrupts. */
-let runningCwd: string | null = null;
+/** Worktrees with a turn in flight. Runs are per-worktree and concurrent. */
+const runningCwds = new Set<string>();
+/** Interval repainting the rail's +/- + dirty dots while any run is going. */
+let statsPoll = 0;
 
-async function guarded(label: string, cwd: string | null, work: () => Promise<void>) {
-  if (running) return;
-  running = true;
-  runningCwd = cwd;
-  sendBtn.disabled = true;
-  sendBtn.textContent = label;
-  stopBtn.hidden = cwd === null;
-  rail.setRunning(cwd);
-  try {
-    await work();
-  } finally {
-    running = false;
-    runningCwd = null;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-    stopBtn.hidden = true;
-    rail.setRunning(null);
+/**
+ * Reflect the *active* worktree's run state on Send/Stop. Runs are per-worktree,
+ * so these buttons always speak for the selected one — a sibling running in the
+ * background doesn't disable Send here. No-op in the browser, where there are no
+ * worktrees and the mock path drives the button itself.
+ */
+function updateSendStop() {
+  if (!window.cockpit?.agent) return;
+  const busy = !!activeWorktree && runningCwds.has(activeWorktree.path);
+  sendBtn.disabled = busy || !activeWorktree;
+  sendBtn.textContent = busy ? '● working…' : 'Send';
+  stopBtn.hidden = !busy;
+}
+
+/**
+ * A background run edits its worktree with no status event per keystroke, so
+ * while anything is running, poll the rail to keep its +/- and dirty dots live.
+ */
+function syncStatsPoll() {
+  if (runningCwds.size && !statsPoll) {
+    statsPoll = window.setInterval(() => rail.refresh(), 1500);
+  } else if (!runningCwds.size && statsPoll) {
+    clearInterval(statsPoll);
+    statsPoll = 0;
   }
 }
 
 stopBtn.addEventListener('click', () => {
-  if (runningCwd) window.cockpit?.agent.interrupt(runningCwd);
+  if (activeWorktree && runningCwds.has(activeWorktree.path)) {
+    window.cockpit?.agent.interrupt(activeWorktree.path);
+  }
 });
 
 async function sendPrompt() {
   const prompt = promptInput.value.trim();
   if (!prompt) return;
 
-  // Desktop: continue the live Claude session pinned to the active worktree.
+  // Desktop: each worktree has its own live session; several can run at once,
+  // each unspooling into its own transcript whether or not it's on screen.
   if (window.cockpit?.agent) {
     if (!activeWorktree) {
       document.getElementById('status')!.textContent = 'Select a worktree in the left rail first.';
       return;
     }
     const cwd = activeWorktree.path;
+    if (runningCwds.has(cwd)) return; // that worktree's turn is still going
     promptInput.value = '';
-    await guarded('● working…', cwd, async () => {
-      await runStream(cockpit, electronSource({ prompt, cwd }), { reset: false });
-    });
-    rail.refresh();
+    runningCwds.add(cwd);
+    rail.setRunning(cwd, true);
+    updateSendStop();
+    syncStatsPoll();
+    try {
+      await runStream(cockpit, electronSource({ prompt, cwd }), { key: cwd, reset: false });
+    } finally {
+      runningCwds.delete(cwd);
+      rail.setRunning(cwd, false);
+      rail.refresh();
+      updateSendStop();
+      syncStatsPoll();
+    }
     return;
   }
 
   // Browser: the toy /api/agent path, with a mock fallback.
-  await guarded('● thinking…', null, async () => {
+  sendBtn.disabled = true;
+  sendBtn.textContent = '● thinking…';
+  try {
     let res: Response;
     try {
       res = await requestAgent(prompt, sampleFile);
@@ -253,7 +280,10 @@ async function sendPrompt() {
       return;
     }
     await runStream(cockpit, parseAgentStream(res));
-  });
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+  }
 }
 
 sendBtn.addEventListener('click', sendPrompt);

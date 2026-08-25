@@ -38,6 +38,8 @@ type Pane = {
   bubbleText: string;
   /** Characters of bubbleText revealed so far — the text typewriters in. */
   bubbleShown: number;
+  /** This pane's own typewriter frame, so panes can reveal concurrently. */
+  revealFrame: number;
   tools: Map<string, HTMLElement>;
   todos: HTMLElement | null;
   /** The "thinking" spinner under the prompt (+ its interval), while it thinks. */
@@ -55,14 +57,11 @@ export class Cockpit {
   private models: monaco.editor.ITextModel[] = [];
 
   private panes = new Map<string, Pane>();
-  private pane: Pane;
-
-  /** Bubbles holding deltas that haven't been drawn yet. */
-  private dirty = new Set<Pane>();
-  /** Pending render frame, or 0 when nothing is scheduled. */
-  private frame = 0;
-  /** Pending typewriter-reveal frame, or 0 when the text has caught up. */
-  private revealFrame = 0;
+  /** The current render target — the visible pane, except while a background
+   * run's event is being handled (swapped for that call only). */
+  private pane!: Pane;
+  /** The pane actually on screen. Scrolling and the diff surface follow this. */
+  private visible!: Pane;
 
   private thoughts: monaco.editor.IModelDeltaDecoration[] = [];
   private thoughtCollection: monaco.editor.IEditorDecorationsCollection | null = null;
@@ -86,8 +85,6 @@ export class Cockpit {
 
   constructor() {
     this.conversations = document.getElementById('conversation')!;
-    this.pane = this.paneFor('default');
-    this.showPane('default');
     this.tabs = document.getElementById('tabs')!;
     this.status = document.getElementById('status')!;
     const diffContainer = document.getElementById('diff')!;
@@ -106,6 +103,9 @@ export class Cockpit {
       renderOverviewRuler: false,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
     });
+
+    this.pane = this.visible = this.paneFor('default');
+    this.showPane('default');
   }
 
   private paneFor(key: string): Pane {
@@ -121,6 +121,7 @@ export class Cockpit {
         bubbleBody: null,
         bubbleText: '',
         bubbleShown: 0,
+        revealFrame: 0,
         tools: new Map(),
         todos: null,
         spinner: null,
@@ -133,22 +134,9 @@ export class Cockpit {
   }
 
   /**
-   * Markdown renders from the bubble's whole source, because a delta that closes
-   * a fence or starts a list changes blocks already on screen. Per delta that
-   * would be a full innerHTML swap per token — enough to drop frames, and to
-   * drop any selection the reader is holding — so renders coalesce to one a
-   * frame, which is as often as the change could be seen anyway.
+   * Markdown renders from the bubble's whole (revealed) source, because a delta
+   * that closes a fence or starts a list changes blocks already on screen.
    */
-  private scheduleRender(pane: Pane) {
-    this.dirty.add(pane);
-    this.frame ||= requestAnimationFrame(() => {
-      this.frame = 0;
-      for (const p of this.dirty) this.draw(p);
-      this.dirty.clear();
-      this.scrollDown();
-    });
-  }
-
   private draw(pane: Pane) {
     if (pane.bubbleBody) {
       pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText.slice(0, pane.bubbleShown));
@@ -161,23 +149,26 @@ export class Cockpit {
    * scheduled render might otherwise land after the bubble had been let go.
    */
   private closeBubble() {
+    const pane = this.pane;
     // Snap the typewriter to the end so a bubble never freezes half-revealed.
-    if (this.revealFrame) {
-      cancelAnimationFrame(this.revealFrame);
-      this.revealFrame = 0;
+    if (pane.revealFrame) {
+      cancelAnimationFrame(pane.revealFrame);
+      pane.revealFrame = 0;
     }
-    this.pane.bubbleShown = this.pane.bubbleText.length;
-    this.dirty.delete(this.pane);
-    if (this.pane.bubbleBody) this.draw(this.pane);
-    this.pane.bubbleType = null;
-    this.pane.bubbleBody = null;
-    this.pane.bubbleText = '';
-    this.pane.bubbleShown = 0;
+    pane.bubbleShown = pane.bubbleText.length;
+    if (pane.bubbleBody) this.draw(pane);
+    pane.bubbleType = null;
+    pane.bubbleBody = null;
+    pane.bubbleText = '';
+    pane.bubbleShown = 0;
   }
 
   /** Drop a pane's drawn transcript and every live handle into it. */
   private blankPane(pane: Pane) {
-    this.dirty.delete(pane);
+    if (pane.revealFrame) {
+      cancelAnimationFrame(pane.revealFrame);
+      pane.revealFrame = 0;
+    }
     if (pane.spinnerTimer) {
       clearInterval(pane.spinnerTimer);
       pane.spinnerTimer = 0;
@@ -210,26 +201,9 @@ export class Cockpit {
     if (pane.restored) return;
     pane.restored = true;
     const events = (await window.cockpit?.store.transcript(key)) ?? [];
-    if (!events.length) return;
-
-    // handle() draws into the active pane, so aim it at the one being restored.
-    const previous = this.pane;
-    this.pane = pane;
-    try {
-      for (const event of events) {
-        if (this.pane !== pane) {
-          // Switched away mid-replay. Drop the half-drawn transcript rather
-          // than leak the rest of it into whatever pane is active now; the
-          // next visit replays from the store cleanly.
-          this.blankPane(pane);
-          pane.restored = false;
-          return;
-        }
-        await this.handle(event, true);
-      }
-    } finally {
-      if (this.pane === pane) this.pane = previous;
-    }
+    // handleEvent aims each event at `key`'s pane and runs synchronously, so the
+    // whole replay lands atomically — no way to switch panes mid-stream.
+    for (const event of events) this.handleEvent(key, event, true);
   }
 
   /**
@@ -237,8 +211,12 @@ export class Cockpit {
    * switching worktrees mid-flight never loses a conversation.
    */
   showPane(key: string) {
-    this.pane = this.paneFor(key);
+    this.visible = this.pane = this.paneFor(key);
     for (const [k, p] of this.panes) p.el.classList.toggle('visible', k === key);
+    // The diff/status surface is shared and single — it can't show two worktrees
+    // at once, so clear it on switch. The now-visible run rebuilds it on its next
+    // edit, and the Changes tab is the reliable per-worktree view meanwhile.
+    this.resetDiff();
     this.scrollDown();
   }
 
@@ -253,14 +231,14 @@ export class Cockpit {
     this.blankPane(pane);
     pane.el.remove();
     this.panes.delete(key);
-    if (this.pane === pane) this.showPane('default');
+    if (this.visible === pane) this.showPane('default');
   }
 
   /** Full teardown of the visible transcript plus the diff surface. */
   reset() {
-    this.blankPane(this.pane);
-    this.pane.restored = true;
-    window.cockpit?.store.clearTranscript(this.pane.key);
+    this.blankPane(this.visible);
+    this.visible.restored = true;
+    window.cockpit?.store.clearTranscript(this.visible.key);
     this.resetDiff();
   }
 
@@ -319,10 +297,29 @@ export class Cockpit {
   }
 
   /**
-   * Draw one event. `replaying` marks events coming back from the store rather
-   * than off a live run — same transcript, but nothing to animate.
+   * Route one event into `key`'s pane. Swapping the render target for just this
+   * synchronous call is what lets several worktrees stream at once without their
+   * transcripts bleeding together. A live event also marks the pane current, so
+   * a later click never replays the store on top of it.
    */
-  async handle(event: AgentEvent, replaying = false) {
+  handleEvent(key: string, event: AgentEvent, replaying = false) {
+    const target = this.paneFor(key);
+    if (!replaying) target.restored = true;
+    const prev = this.pane;
+    this.pane = target;
+    try {
+      this.handle(event, replaying);
+    } finally {
+      this.pane = prev;
+    }
+  }
+
+  /**
+   * Draw one event into the current render target (`this.pane`). Synchronous, so
+   * handleEvent's pane swap stays atomic. `replaying` marks events coming back
+   * from the store — same transcript, but nothing live to animate.
+   */
+  private handle(event: AgentEvent, replaying = false) {
     // The spinner means "thinking, nothing shown yet" — any real output ends it.
     if (!replaying && event.type !== 'user' && event.type !== 'thinking') this.stopSpinner();
     switch (event.type) {
@@ -344,7 +341,7 @@ export class Cockpit {
         this.appendDelta('say', event.text, replaying);
         break;
       case 'plan':
-        await this.renderPlan(event.title, event.items);
+        this.renderPlan(event.title, event.items);
         break;
       case 'tool_start':
         this.startTool(event.id, event.name, event.summary, event.detail);
@@ -358,21 +355,24 @@ export class Cockpit {
       case 'edit_start':
         // Break the transcript bubble now, in event order; the diff catches up.
         this.closeBubble();
-        // Stored transcripts keep this event for that break, but drop the file
-        // contents and the ops that followed — the diff pane is live-only
-        // state, so on replay there is nothing to type out.
-        if (!replaying) {
+        // The diff is one shared surface, so only the *visible* worktree's run
+        // drives it. A background run's edits still record as tool rows in its
+        // own transcript, and show in its Changes tab via git. (Replayed history
+        // drops the contents + ops, so there is nothing to type out either way.)
+        if (!replaying && this.pane === this.visible) {
           this.enqueue(() => this.startEdit(event.file, event.language, event.original));
         }
         break;
       case 'edit_op':
-        this.enqueue(() => this.applyEditOp(event.op));
+        if (this.pane === this.visible) this.enqueue(() => this.applyEditOp(event.op));
         break;
       case 'edit_end':
-        this.enqueue(() => {
-          const done = this.status.textContent.replace('✎ editing', '✓ edited');
-          this.status.textContent = this.appliedWhole ? `${done} · applied at once` : done;
-        });
+        if (this.pane === this.visible) {
+          this.enqueue(() => {
+            const done = this.status.textContent.replace('✎ editing', '✓ edited');
+            this.status.textContent = this.appliedWhole ? `${done} · applied at once` : done;
+          });
+        }
         break;
       case 'error':
         this.closeBubble();
@@ -385,6 +385,8 @@ export class Cockpit {
   }
 
   private scrollDown() {
+    // Only the visible pane is on screen; a background run must not yank scroll.
+    if (this.pane !== this.visible) return;
     this.conversations.scrollTop = this.conversations.scrollHeight;
   }
 
@@ -533,18 +535,19 @@ export class Cockpit {
    * within ~half a second, but never lands fewer than a couple chars per frame.
    */
   private revealTick(pane: Pane) {
-    if (this.revealFrame) return;
+    if (pane.revealFrame) return;
     const step = () => {
-      this.revealFrame = 0;
+      pane.revealFrame = 0;
       const remaining = pane.bubbleText.length - pane.bubbleShown;
       if (remaining <= 0) return;
       pane.bubbleShown += Math.max(2, Math.ceil(remaining / 30));
       if (pane.bubbleShown > pane.bubbleText.length) pane.bubbleShown = pane.bubbleText.length;
       this.draw(pane);
-      this.scrollDown();
-      if (pane.bubbleShown < pane.bubbleText.length) this.revealFrame = requestAnimationFrame(step);
+      // This pane may be a background run — only follow scroll if it's on screen.
+      if (pane === this.visible) this.conversations.scrollTop = this.conversations.scrollHeight;
+      if (pane.bubbleShown < pane.bubbleText.length) pane.revealFrame = requestAnimationFrame(step);
     };
-    this.revealFrame = requestAnimationFrame(step);
+    pane.revealFrame = requestAnimationFrame(step);
   }
 
   /** A tight |/-\ spinner under the prompt while Claude thinks with no output yet. */
@@ -576,7 +579,7 @@ export class Cockpit {
     pane.spinner = null;
   }
 
-  private async renderPlan(title: string, items: PlanItem[]) {
+  private renderPlan(title: string, items: PlanItem[]) {
     this.closeBubble();
     const wrap = this.addMessage('plan');
     const heading = document.createElement('div');
@@ -594,13 +597,17 @@ export class Cockpit {
       if (item.snippet) {
         const snip = document.createElement('div');
         snip.className = 'snippet';
-        snip.innerHTML = await monaco.editor.colorize(item.snippet.code, item.snippet.lang, {});
         row.append(snip);
+        // The row is placed synchronously; fill in highlighting once it's ready
+        // (keeping renderPlan itself synchronous, so handleEvent stays atomic).
+        const { code, lang } = item.snippet;
+        void monaco.editor.colorize(code, lang, {}).then((html) => {
+          snip.innerHTML = html;
+        });
       }
       wrap.append(row);
-      this.scrollDown();
-      await sleep(200);
     }
+    this.scrollDown();
   }
 
   private startEdit(file: string, language: string, original: string) {
@@ -768,12 +775,13 @@ export class Cockpit {
 export async function runStream(
   ui: Cockpit,
   source: AsyncIterable<AgentEvent>,
-  { reset = true }: { reset?: boolean } = {},
+  { key = 'default', reset = true }: { key?: string; reset?: boolean } = {},
 ) {
   if (reset) ui.reset();
-  else ui.resetDiff();
   for await (const event of source) {
-    await ui.handle(event);
+    // Route to this run's own worktree pane, so it keeps unspooling there even
+    // while another worktree is on screen.
+    ui.handleEvent(key, event);
     if (event.type === 'done') break;
   }
   // Events are done, but the diff may still be typing the last edit out.

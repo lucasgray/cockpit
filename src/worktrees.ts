@@ -15,8 +15,9 @@ function writeStoredPath(path: string | null) {
 }
 
 /**
- * Uncommitted churn, sitting opposite the branch name. A clean worktree gets
- * nothing at all rather than a "+0 -0" that reads like a real measurement.
+ * Uncommitted churn, floated to the right edge of the row on the name line —
+ * where the port chip used to sit. A clean worktree gets nothing at all rather
+ * than a "+0 -0" that reads like a real measurement.
  */
 function statHtml(wt: Worktree): string {
   if (!wt.added && !wt.removed) return '';
@@ -25,21 +26,6 @@ function statHtml(wt: Worktree): string {
     wt.removed ? `<span class="wt-del">-${wt.removed}</span>` : '',
   ];
   return `<span class="wt-stat" title="uncommitted lines changed">${parts.join('')}</span>`;
-}
-
-/**
- * The worktree's own dev-server port, lit while something is serving on it.
- *
- * Distinct from the gutter dot, which is about the *agent*: a worktree can be
- * serving with no turn in flight, or mid-turn with nothing served. With runs
- * going in several worktrees at once this is the only thing that says which are
- * up and where to reach them.
- */
-function portHtml(wt: Worktree): string {
-  if (!wt.port) return '';
-  const live = wt.serving ? ' live' : '';
-  const title = wt.serving ? `serving on http://127.0.0.1:${wt.port}` : `assigned port ${wt.port}`;
-  return `<span class="wt-port${live}" title="${title}">:${wt.port}</span>`;
 }
 
 export class WorktreeRail {
@@ -53,8 +39,12 @@ export class WorktreeRail {
   /** Set while a removal is in flight, so the rail can't be acted on twice. */
   private busy: { path: string; label: string } | null = null;
   private error: { path: string; message: string } | null = null;
-  /** The worktree whose agent turn is in flight — its dot pulses. */
-  private runningPath: string | null = null;
+  /** True while the "+ New worktree" input is open, so a background refresh
+   *  doesn't re-render the rail out from under what's being typed. */
+  private inputOpen = false;
+  /** Worktrees whose agent turn is in flight — their dots pulse. Several can run
+   *  at once, one turn per worktree. */
+  private running = new Set<string>();
   /** Live status dots by worktree path, so a turn starting can repaint just
    * those without re-rendering the rail out from under an open input. */
   private dots = new Map<string, HTMLElement>();
@@ -102,6 +92,9 @@ export class WorktreeRail {
   /** Re-read git state (dirty flags, new branches) without dropping selection. */
   async refresh() {
     if (!window.cockpit) return;
+    // Don't yank a half-typed "+ New worktree" input or an open confirm out from
+    // under the user; the next uninterrupted refresh picks the changes up.
+    if (this.inputOpen || this.confirmPath || this.busy) return;
     try {
       this.worktrees = await window.cockpit.worktrees.list();
       this.render();
@@ -111,22 +104,22 @@ export class WorktreeRail {
   }
 
   /**
-   * Mark which worktree has a turn in flight. Patches the affected dots in
-   * place instead of re-rendering: a turn can start or end while the "+ New
-   * worktree" input is open, and a re-render would throw that input away.
+   * Mark one worktree's turn as running or not, repainting just its dot rather
+   * than re-rendering — a turn can start or end while the "+ New worktree" input
+   * or a delete confirmation is open, and a re-render would throw that away.
+   * Several worktrees can be running at once (one turn each).
    */
-  setRunning(path: string | null) {
-    if (this.runningPath === path) return;
-    const changed = [this.runningPath, path].filter((p): p is string => p !== null);
-    this.runningPath = path;
-    for (const p of changed) {
-      const dot = this.dots.get(p);
-      const wt = this.worktrees.find((candidate) => candidate.path === p);
-      if (dot && wt) this.paintDot(dot, wt);
-    }
+  setRunning(path: string, on: boolean) {
+    if (on === this.running.has(path)) return;
+    if (on) this.running.add(path);
+    else this.running.delete(path);
+    const dot = this.dots.get(path);
+    const wt = this.worktrees.find((candidate) => candidate.path === path);
+    if (dot && wt) this.paintDot(dot, wt);
   }
 
   private render() {
+    this.inputOpen = false;
     this.container.innerHTML = '';
     this.dots.clear();
     this.container.append(this.newControl());
@@ -141,7 +134,9 @@ export class WorktreeRail {
    */
   private row(wt: Worktree): HTMLElement {
     const row = document.createElement('div');
-    row.className = 'wt-row';
+    // Selection reads on the row, not the button, so the outline encloses the
+    // gutter and any confirm/error line the row is carrying.
+    row.className = 'wt-row' + (wt.path === this.activePath ? ' active' : '');
 
     if (this.busy?.path === wt.path) {
       row.classList.add('pending');
@@ -153,16 +148,15 @@ export class WorktreeRail {
     }
 
     const item = document.createElement('button');
-    item.className = 'wt' + (wt.path === this.activePath ? ' active' : '');
+    item.className = 'wt';
     item.innerHTML = `
       <div class="wt-top">
         <span class="wt-name">${wt.name}</span>
         ${wt.isMain ? '<span class="wt-badge">main</span>' : ''}
-        ${portHtml(wt)}
+        ${statHtml(wt)}
       </div>
       <div class="wt-bottom">
         <span class="wt-branch">${wt.branch}</span>
-        ${statHtml(wt)}
       </div>`;
     item.addEventListener('click', () => {
       this.confirmPath = null;
@@ -224,7 +218,7 @@ export class WorktreeRail {
    * clean and idle. It's always drawn — an empty slot would break the column.
    */
   private paintDot(dot: HTMLElement, wt: Worktree) {
-    const running = this.runningPath === wt.path;
+    const running = this.running.has(wt.path);
     const state = running ? 'running' : wt.dirty ? 'dirty' : 'clean';
     dot.className = `wt-dot ${state}`;
     dot.title = running
@@ -315,6 +309,7 @@ export class WorktreeRail {
   }
 
   private showNewInput(wrap: HTMLElement) {
+    this.inputOpen = true;
     wrap.innerHTML = '';
     const input = document.createElement('input');
     input.className = 'wt-new-input';
