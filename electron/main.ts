@@ -6,21 +6,10 @@ import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
 import { answerAgent, closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
-import {
-  closeRun,
-  detectRunCommand,
-  onRunEvent,
-  runBuffer,
-  runEnv,
-  runStatus,
-  runningWorktrees,
-  startRun,
-  stopRun,
-} from './runner';
 import { ensurePort } from './ports';
 import { getStore, openStore } from './store';
 import type { CockpitSettings } from '../src/settings';
-import { resolvePort } from '../src/runConfig';
+import { resolvePort } from '../src/port';
 
 const execFileAsync = promisify(execFile);
 
@@ -68,9 +57,16 @@ function runCreateHook(dir: string, branch: string, port: number) {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      ...runEnv(port),
       // The hook's whole reason for existing: it can bake the port into a file
-      // at the one moment the worktree is new.
+      // at the one moment the worktree is new. `PORT` is the near-universal
+      // convention, `COCKPIT_PORT` the unambiguous one for projects that
+      // already use `PORT` for something else.
+      COCKPIT_PORT: String(port),
+      PORT: String(port),
+      // The tail lands in the statusline, which renders ANSI colour as escape
+      // noise — ask for plain text instead of stripping it after the fact.
+      FORCE_COLOR: '0',
+      NO_COLOR: '1',
       COCKPIT_WORKTREE: dir,
       COCKPIT_BRANCH: branch,
     },
@@ -182,7 +178,6 @@ async function listWorktrees(): Promise<Worktree[]> {
   const out = await git(PROJECT_ROOT, ['worktree', 'list', '--porcelain']);
   const blocks = out.trim().split('\n\n');
   const worktrees: Worktree[] = [];
-  const serving = new Set(runningWorktrees());
 
   for (const [index, block] of blocks.entries()) {
     let wtPath = '';
@@ -216,11 +211,10 @@ async function listWorktrees(): Promise<Worktree[]> {
       dirty,
       added,
       removed,
-      // Assigned here rather than on first run so the number is visible, and
-      // stable, before anyone presses ▶ Run. Worktrees made outside the cockpit
-      // get one on the first listing that sees them.
+      // Assigned on the first listing that sees the worktree — including ones
+      // made outside the cockpit — so the create hook and anything started in
+      // the worktree by hand agree on a stable number.
       port: await ensurePort(wtPath),
-      serving: serving.has(wtPath),
     });
   }
   return worktrees;
@@ -243,13 +237,12 @@ async function removeWorktree(cwd: string): Promise<WorktreeRemoveResult> {
   if (!target) return { ok: false, error: 'Worktree not found' };
   if (target.isMain) return { ok: false, error: 'The main worktree cannot be removed' };
 
-  // The session holds a CLI subprocess with this directory as its cwd, and a run
-  // may hold a dev server on it too — close both before the directory disappears
-  // from under them. Bounded, because neither must be able to wedge the removal:
-  // worst case they're orphaned and reaped at quit, which beats a button that
-  // never comes back.
+  // The session holds a CLI subprocess with this directory as its cwd — close it
+  // before the directory disappears from under it. Bounded, because it must not
+  // be able to wedge the removal: worst case it's orphaned and reaped at quit,
+  // which beats a button that never comes back.
   await Promise.race([
-    Promise.allSettled([closeAgent(cwd), stopRun(cwd)]),
+    closeAgent(cwd).catch(() => {}),
     new Promise((resolve) => setTimeout(resolve, 5000)),
   ]);
 
@@ -280,12 +273,6 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
     },
-  });
-
-  // A run belongs to the app, not to a call, so its events go straight to the
-  // window. Guarded because output keeps arriving while the window tears down.
-  onRunEvent((event) => {
-    if (!win.isDestroyed()) win.webContents.send('run:event', event);
   });
 
   if (!app.isPackaged) {
@@ -326,12 +313,6 @@ app.whenReady().then(() => {
       answerAgent(req.cwd, req.id, req.selection),
   );
 
-  ipcMain.handle('run:detect', (_event, cwd: string) => detectRunCommand(cwd));
-  ipcMain.handle('run:start', (_event, cwd: string, command?: string) => startRun(cwd, command));
-  ipcMain.handle('run:stop', (_event, cwd: string) => stopRun(cwd));
-  ipcMain.handle('run:status', (_event, cwd: string) => runStatus(cwd));
-  ipcMain.handle('run:buffer', (_event, cwd: string) => runBuffer(cwd));
-
   ipcMain.handle('store:transcript', (_event, cwd: string) => getStore().transcript(cwd));
   ipcMain.handle('store:clearTranscript', (_event, cwd: string) => getStore().clearTranscript(cwd));
   ipcMain.handle('store:selectedWorktree', () => getStore().selectedWorktree());
@@ -353,14 +334,15 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// Live sessions and dev servers both own subprocesses — tear them down instead
-// of orphaning them holding a port.
+// A live session owns a CLI subprocess — tear them down instead of orphaning
+// them once the window that started them is gone.
 let quitting = false;
 app.on('before-quit', (event) => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
-  Promise.allSettled([closeAllAgents(), closeRun()])
+  closeAllAgents()
+    .catch(() => {})
     .finally(() => getStore().close())
     .finally(() => app.quit());
 });

@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 import { anthropicAgentPlugin } from './src/agent/backend';
-import { resolvePort } from './src/runConfig';
+import { resolvePort } from './src/port';
 
 export default defineConfig({
   server: {

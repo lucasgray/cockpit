@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { DEFAULT_PORT } from '../src/runConfig';
+import { DEFAULT_PORT } from '../src/port';
 import { getStore } from './store';
 
 /**

@@ -8,7 +8,7 @@
  * options, the renderer reads it to draw the Settings panel.
  */
 
-import { DEFAULT_PORT } from './runConfig';
+import { DEFAULT_PORT } from './port';
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'dontAsk';
 
@@ -34,15 +34,6 @@ export type CockpitSettings = {
   /** Explicit path to the Claude Code binary, or '' to auto-discover it. */
   claudePath: string;
   /**
-   * Shell command the ▶ Run button starts in the active worktree, or '' to
-   * resolve it from the repo (package.json scripts, Procfile, Makefile).
-   *
-   * An override rather than a default: leaving it empty means every repo the
-   * cockpit opens gets the right command without being told, and setting it
-   * pins one repo that guesses wrong. See `src/runConfig.ts`.
-   */
-  runCommand: string;
-  /**
    * Shell command run in a freshly created worktree, or '' for the default
    * (`$COCKPIT_BOOTSTRAP`, else `npm install`).
    *
@@ -53,7 +44,7 @@ export type CockpitSettings = {
   worktreeCreateHook: string;
   /**
    * Lowest port handed out to a worktree. Each one gets its own, counting up
-   * from here, so two worktrees can run at the same time without colliding.
+   * from here, so two worktrees can serve at the same time without colliding.
    */
   portBase: number;
 };
@@ -65,7 +56,6 @@ export const DEFAULT_SETTINGS: CockpitSettings = {
   instructions: '',
   inheritProjectInstructions: false,
   claudePath: '',
-  runCommand: '',
   worktreeCreateHook: '',
   portBase: DEFAULT_PORT,
 };
@@ -90,7 +80,6 @@ export function normalizeSettings(raw: unknown): CockpitSettings {
     instructions: str(input.instructions, DEFAULT_SETTINGS.instructions),
     inheritProjectInstructions: input.inheritProjectInstructions === true,
     claudePath: str(input.claudePath, DEFAULT_SETTINGS.claudePath).trim(),
-    runCommand: str(input.runCommand, DEFAULT_SETTINGS.runCommand).trim(),
     worktreeCreateHook: str(input.worktreeCreateHook, DEFAULT_SETTINGS.worktreeCreateHook).trim(),
     // Below 1024 needs root to bind, and the range has to leave room to count up.
     portBase: Number.isFinite(base) ? Math.min(60_000, Math.max(1_024, Math.round(base))) : DEFAULT_PORT,

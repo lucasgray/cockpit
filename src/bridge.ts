@@ -1,6 +1,5 @@
 import type { AgentEvent } from './agent/protocol';
 import type { CockpitSettings } from './settings';
-import type { RunChunk, RunCommand, RunStatus, RunEvent } from './runConfig';
 
 export type Worktree = {
   path: string;
@@ -14,9 +13,6 @@ export type Worktree = {
   removed: number;
   /** This worktree's own dev-server port, so siblings don't collide. */
   port: number;
-  /** Whether a run is serving in this worktree right now. Distinct from the
-   * rail's agent-running dot: serving is about the dev server, not the turn. */
-  serving: boolean;
 };
 
 export type AgentRunRequest = {
@@ -67,22 +63,6 @@ export type CockpitBridge = {
     interrupt: (cwd: string) => Promise<void>;
     /** Answer a pending `question` event, unblocking the ask tool's turn. */
     answer: (cwd: string, id: string, selection: string) => Promise<void>;
-  };
-  /**
-   * Starting the project a worktree holds — one run per worktree, concurrently,
-   * each on its own assigned port. Starting one already up restarts it.
-   */
-  run: {
-    /** The command that would run, and where it was resolved from. */
-    detect: (cwd: string) => Promise<RunCommand>;
-    /** Start in `cwd`; `command` overrides resolution for this run only. */
-    start: (cwd: string, command?: string) => Promise<RunStatus>;
-    stop: (cwd: string) => Promise<RunStatus>;
-    status: (cwd: string) => Promise<RunStatus>;
-    /** Output so far, for repopulating the pane when it is reopened. */
-    buffer: (cwd: string) => Promise<RunChunk[]>;
-    /** Subscribe to status and output for every worktree. Returns unsubscribe. */
-    onEvent: (listener: (event: RunEvent) => void) => () => void;
   };
   /**
    * The app's own SQLite state, in the main process. Transcripts are kept as the

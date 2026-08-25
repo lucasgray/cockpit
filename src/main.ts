@@ -7,7 +7,6 @@ import { parseAgentStream, requestAgent } from './agent/claudeSource';
 import { electronSource } from './agent/electronSource';
 import { sampleFile } from './agent/sample';
 import { WorktreeRail } from './worktrees';
-import { RunPane, runButtonLabel } from './runPane';
 import type { Worktree } from './bridge';
 
 registerCockpitTheme();
@@ -22,7 +21,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </div>
       <span class="active-wt" id="active-wt">no worktree</span>
       <div class="spacer"></div>
-      <button id="run-app" class="btn primary" disabled>▶ Run</button>
     </header>
     <main class="body">
       <aside class="rail">
@@ -49,12 +47,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div class="ws-toggle">
             <button id="view-live" class="ws-tab active">Live</button>
             <button id="view-changes" class="ws-tab">Changes</button>
-            <button id="view-run" class="ws-tab">Run</button>
           </div>
         </div>
         <div class="diff" id="diff"></div>
         <div class="changes" id="changes" hidden></div>
-        <div class="run-pane" id="run-pane" hidden></div>
         <div class="statusline" id="status"></div>
       </section>
     </main>
@@ -62,7 +58,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 `;
 
 const cockpit = new Cockpit();
-const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
@@ -70,21 +65,6 @@ const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 const railBody = document.getElementById('rail-body') as HTMLElement;
 
 let activeWorktree: Worktree | null = null;
-
-/**
- * The topbar button mirrors the Run pane, which shows the *active* worktree.
- * Runs are per-worktree, so ▶ Run / ■ Stop always refers to the selected one —
- * a sibling still serving on its own port doesn't change this button.
- */
-const runPane = new RunPane(document.getElementById('run-pane') as HTMLElement, (status) => {
-  runAppBtn.textContent = runButtonLabel(status);
-  runAppBtn.classList.toggle('danger', status.state === 'running');
-  runAppBtn.classList.toggle('primary', status.state !== 'running');
-  runAppBtn.disabled = !window.cockpit || !activeWorktree;
-  runAppBtn.title = activeWorktree
-    ? `${status.command || 'run'} — port ${activeWorktree.port} (${status.state})`
-    : 'Select a worktree first';
-});
 
 const rail = new WorktreeRail(
   railBody,
@@ -96,7 +76,6 @@ const rail = new WorktreeRail(
     // the stored one the first time it's opened this run.
     cockpit.showPane(wt.path);
     cockpit.restorePane(wt.path);
-    void runPane.setWorktree(wt);
     // Send/Stop speak for the selected worktree — refresh them on every switch.
     updateSendStop();
     // Picking a worktree is the start of typing at it — go straight to the box.
@@ -108,8 +87,6 @@ const rail = new WorktreeRail(
       activeWtLabel.textContent = 'no worktree';
       activeWtLabel.classList.remove('set');
       cockpit.resetDiff();
-      // The directory is gone; its run went with it in removeWorktree.
-      void runPane.setWorktree(null);
       updateSendStop();
     }
     cockpit.dropPane(path);
@@ -118,20 +95,10 @@ const rail = new WorktreeRail(
 
 const viewLiveBtn = document.getElementById('view-live') as HTMLButtonElement;
 const viewChangesBtn = document.getElementById('view-changes') as HTMLButtonElement;
-const viewRunBtn = document.getElementById('view-run') as HTMLButtonElement;
-const runPaneEl = document.getElementById('run-pane') as HTMLElement;
 
-function setWorkspaceView(view: 'live' | 'changes' | 'run') {
+function setWorkspaceView(view: 'live' | 'changes') {
   viewLiveBtn.classList.toggle('active', view === 'live');
   viewChangesBtn.classList.toggle('active', view === 'changes');
-  viewRunBtn.classList.toggle('active', view === 'run');
-  runPaneEl.hidden = view !== 'run';
-  if (view === 'run') {
-    // Monaco's container is display-toggled rather than hidden, so the Run pane
-    // has to put both of the other two away itself.
-    document.getElementById('changes')!.hidden = true;
-    document.getElementById('diff')!.style.display = 'none';
-  }
 }
 
 viewLiveBtn.addEventListener('click', () => {
@@ -144,23 +111,6 @@ viewChangesBtn.addEventListener('click', async () => {
   const cwd = activeWorktree?.path;
   const diff = cwd && window.cockpit ? await window.cockpit.worktrees.diff(cwd) : '';
   await cockpit.showChanges(diff);
-});
-
-viewRunBtn.addEventListener('click', () => setWorkspaceView('run'));
-
-// The button starts (or stops) the run; the pane is where the output is, so
-// showing it on the way is the point of pressing the button.
-runAppBtn.addEventListener('click', () => {
-  setWorkspaceView('run');
-  runPane.toggle();
-});
-
-// Runs come up and go down in worktrees other than the active one, and the rail
-// is where their ports light up — so it refreshes on any status change, not just
-// the selected worktree's. Status events fire on transitions only, never on
-// output, so this stays cheap.
-window.cockpit?.run.onEvent((event) => {
-  if (event.type === 'status') rail.refresh();
 });
 
 // The create hook runs in the background long after the worktree appears, so its
