@@ -97,6 +97,8 @@ const rail = new WorktreeRail(
     cockpit.showPane(wt.path);
     cockpit.restorePane(wt.path);
     void runPane.setWorktree(wt);
+    // Picking a worktree is the start of typing at it — go straight to the box.
+    promptInput.focus();
   },
   (path) => {
     if (activeWorktree?.path === path) {
