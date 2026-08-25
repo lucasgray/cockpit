@@ -6,8 +6,13 @@ import type {
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { z } from 'zod';
 import type { AgentEvent, TodoItem, TodoStatus } from '../src/agent/protocol';
+
+/** The MCP tool the model uses to ask the operator a question (see start()). */
+const ASK_TOOL = 'mcp__cockpit__ask';
 
 // The Agent SDK is ESM-only, but this Electron main is bundled to CommonJS.
 // A static import compiles to require() and throws ERR_REQUIRE_ESM, so load it
@@ -207,6 +212,8 @@ class Session {
   private closed = false;
   private pump: Promise<void> | null = null;
   private interrupted = false;
+  /** Open ask-tool calls, by question id, waiting for the operator's answer. */
+  private pendingQuestions = new Map<string, (answer: string) => void>();
 
   constructor(cwd: string) {
     this.cwd = cwd;
@@ -263,17 +270,76 @@ class Session {
     return {};
   };
 
+  /** Resolve any open ask-tool call, so its turn unblocks instead of hanging. */
+  answer(id: string, selection: string) {
+    const resolve = this.pendingQuestions.get(id);
+    if (!resolve) return;
+    this.pendingQuestions.delete(id);
+    resolve(selection);
+  }
+
+  /** Unblock every open ask-tool call, so an interrupt/close never hangs a turn. */
+  private dismissQuestions(text: string) {
+    for (const resolve of this.pendingQuestions.values()) resolve(text);
+    this.pendingQuestions.clear();
+  }
+
   private async start() {
-    const { query } = await loadSdk();
+    const { query, tool, createSdkMcpServer } = await loadSdk();
+
+    // The built-in AskUserQuestion can't be answered from an SDK host — it just
+    // returns "the user did not answer". So we own the question tool: its handler
+    // emits a `question` event to the renderer and blocks on the operator's real
+    // answer, which comes back via answer() and becomes the tool result.
+    const askTool = tool(
+      'ask',
+      "Ask the operator a multiple-choice question and wait for their answer. Use this whenever you need them to choose between options or decide before continuing. Returns the operator's selection.",
+      {
+        questions: z
+          .array(
+            z.object({
+              question: z.string(),
+              header: z.string(),
+              multiSelect: z.boolean().optional(),
+              options: z.array(z.object({ label: z.string(), description: z.string() })).min(2),
+            }),
+          )
+          .min(1),
+      },
+      async (args) => {
+        const id = randomUUID();
+        const questions = args.questions.map((q) => ({
+          question: q.question,
+          header: q.header,
+          multiSelect: q.multiSelect ?? false,
+          options: q.options.map((o) => ({ label: o.label, description: o.description })),
+        }));
+        this.emit({ type: 'question', id, questions });
+        const answer = await new Promise<string>((resolve) => {
+          this.pendingQuestions.set(id, resolve);
+        });
+        return { content: [{ type: 'text' as const, text: answer }] };
+      },
+    );
+
     this.query = query({
       prompt: this.input(),
       options: {
         cwd: this.cwd,
         permissionMode: 'default',
         includePartialMessages: true,
-        systemPrompt: { type: 'preset', preset: 'claude_code' },
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+          append:
+            'To ask the operator a question or have them choose between options, call the `ask` ' +
+            'tool (mcp__cockpit__ask) and wait for its result — never the AskUserQuestion tool. ' +
+            'It returns the operator’s selection.',
+        },
         canUseTool: this.canUseTool,
         hooks: { PreToolUse: [{ hooks: [this.preToolUse], timeout: 10 }] },
+        mcpServers: { cockpit: createSdkMcpServer({ name: 'cockpit', tools: [askTool] }) },
+        disallowedTools: ['AskUserQuestion'],
         maxTurns: 100,
       },
     });
@@ -313,6 +379,8 @@ class Session {
             this.emit({ type: 'todos', items: parseTodos(input) });
             continue;
           }
+          // The ask tool is drawn as an interactive question, not a tool row.
+          if (block.name === ASK_TOOL) continue;
           this.emit({
             type: 'tool_start',
             id: block.id,
@@ -376,6 +444,7 @@ class Session {
   async interrupt() {
     if (!this.query) return;
     this.interrupted = true;
+    this.dismissQuestions('The operator interrupted before answering.');
     try {
       await this.query.interrupt();
     } catch {
@@ -385,6 +454,7 @@ class Session {
 
   async close() {
     this.closed = true;
+    this.dismissQuestions('Session closed.');
     this.wake?.();
     this.wake = null;
     try {
@@ -423,6 +493,11 @@ export async function runAgent(
 
 export async function interruptAgent(cwd: string): Promise<void> {
   await sessions.get(cwd)?.interrupt();
+}
+
+/** Feed the operator's answer back to a waiting ask-tool call. */
+export function answerAgent(cwd: string, id: string, selection: string): void {
+  sessions.get(cwd)?.answer(id, selection);
 }
 
 /** Tear down a worktree's session — used when the worktree itself goes away. */

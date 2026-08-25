@@ -15,6 +15,16 @@ export type TodoStatus = 'pending' | 'in_progress' | 'completed';
 
 export type TodoItem = { text: string; status: TodoStatus };
 
+export type QuestionOption = { label: string; description: string };
+
+/** One multiple-choice question the agent is asking the operator. */
+export type QuestionSpec = {
+  question: string;
+  header: string;
+  multiSelect: boolean;
+  options: QuestionOption[];
+};
+
 export type AgentEvent =
   | { type: 'user'; text: string }
   | { type: 'thinking'; text: string }
@@ -23,6 +33,9 @@ export type AgentEvent =
   | { type: 'tool_start'; id: string; name: string; summary: string; detail?: string }
   | { type: 'tool_end'; id: string; ok: boolean; detail?: string }
   | { type: 'todos'; items: TodoItem[] }
+  // The agent is asking the operator to choose. The turn blocks in the SDK until
+  // the answer goes back through window.cockpit.agent.answer(cwd, id, …).
+  | { type: 'question'; id: string; questions: QuestionSpec[] }
   | { type: 'edit_start'; file: string; language: string; original: string }
   | { type: 'edit_op'; op: EditOp }
   | { type: 'edit_end' }

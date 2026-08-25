@@ -1,6 +1,6 @@
 import { monaco } from './monaco-env';
 import { renderMarkdown } from './markdown';
-import type { AgentEvent, EditOp, PlanItem, TodoItem } from './agent/protocol';
+import type { AgentEvent, EditOp, PlanItem, QuestionSpec, TodoItem } from './agent/protocol';
 
 const sleep = (ms: number) =>
   document.hidden ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
@@ -352,6 +352,9 @@ export class Cockpit {
       case 'todos':
         this.renderTodos(event.items);
         break;
+      case 'question':
+        this.renderQuestion(event.id, event.questions, replaying);
+        break;
       case 'edit_start':
         // Break the transcript bubble now, in event order; the diff catches up.
         this.closeBubble();
@@ -483,6 +486,100 @@ export class Cockpit {
       row.append(glyph, text);
       this.pane.todos.append(row);
     }
+    this.scrollDown();
+  }
+
+  /**
+   * An interactive multiple-choice question from the agent. The turn is blocked
+   * in the SDK until answer() feeds a result back, so this stays clickable until
+   * the operator picks. A single single-select question submits on one click;
+   * anything richer collects selections behind a "Send answer" button.
+   */
+  private renderQuestion(id: string, questions: QuestionSpec[], replaying = false) {
+    this.closeBubble();
+    const cwd = this.pane.key;
+    const wrap = this.addMessage('question');
+    const picks: Set<string>[] = questions.map(() => new Set<string>());
+    const submitBtns: HTMLButtonElement[] = [];
+    const singleShot = questions.length === 1 && !questions[0]?.multiSelect;
+
+    const finish = () => {
+      if (wrap.classList.contains('answered')) return;
+      wrap.classList.add('answered');
+      wrap.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      const summary = questions
+        .map((q, i) => `${q.header}: ${[...picks[i]].join(', ')}`)
+        .join('\n');
+      const chosen = document.createElement('div');
+      chosen.className = 'question-answer';
+      chosen.textContent = `↳ ${questions.map((_, i) => [...picks[i]].join(', ')).filter(Boolean).join(' · ')}`;
+      wrap.append(chosen);
+      void window.cockpit?.agent.answer(cwd, id, summary);
+    };
+
+    const refreshSubmit = () => {
+      const ready = picks.every((s) => s.size > 0);
+      for (const b of submitBtns) b.disabled = !ready;
+    };
+
+    questions.forEach((q, i) => {
+      const qEl = document.createElement('div');
+      qEl.className = 'question-item';
+      qEl.innerHTML =
+        '<div class="question-head"><span class="question-chip"></span>' +
+        '<span class="question-text"></span></div>';
+      qEl.querySelector('.question-chip')!.textContent = q.header;
+      qEl.querySelector('.question-text')!.textContent = q.question;
+
+      const opts = document.createElement('div');
+      opts.className = 'question-options';
+      for (const opt of q.options) {
+        const b = document.createElement('button');
+        b.className = 'question-option';
+        b.innerHTML = '<span class="opt-label"></span><span class="opt-desc"></span>';
+        b.querySelector('.opt-label')!.textContent = opt.label;
+        b.querySelector('.opt-desc')!.textContent = opt.description;
+        b.addEventListener('click', () => {
+          if (wrap.classList.contains('answered')) return;
+          if (q.multiSelect) {
+            if (picks[i].has(opt.label)) {
+              picks[i].delete(opt.label);
+              b.classList.remove('selected');
+            } else {
+              picks[i].add(opt.label);
+              b.classList.add('selected');
+            }
+          } else {
+            picks[i].clear();
+            picks[i].add(opt.label);
+            opts.querySelectorAll('.question-option').forEach((o) => o.classList.remove('selected'));
+            b.classList.add('selected');
+          }
+          if (singleShot) finish();
+          else refreshSubmit();
+        });
+        opts.append(b);
+      }
+      qEl.append(opts);
+      wrap.append(qEl);
+    });
+
+    if (!singleShot) {
+      const submit = document.createElement('button');
+      submit.className = 'question-submit';
+      submit.textContent = 'Send answer';
+      submit.disabled = true;
+      submit.addEventListener('click', finish);
+      submitBtns.push(submit);
+      wrap.append(submit);
+    }
+
+    // A replayed question is history — the turn that asked it is long over.
+    if (replaying) {
+      wrap.classList.add('answered', 'past');
+      wrap.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    }
+
     this.scrollDown();
   }
 

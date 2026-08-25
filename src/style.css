@@ -562,6 +562,124 @@ body {
   margin-bottom: 16px;
 }
 
+/* Interactive question from the agent (the ask tool). */
+.msg.question {
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.question-item {
+  margin-bottom: 12px;
+}
+
+.question-item:last-of-type {
+  margin-bottom: 0;
+}
+
+.question-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.question-chip {
+  flex: none;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.question-text {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.question-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.question-option:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.question-option.selected {
+  border-color: var(--accent);
+  background: var(--panel);
+}
+
+.question-option:disabled {
+  cursor: default;
+}
+
+.opt-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.opt-desc {
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.4;
+}
+
+.question-submit {
+  margin-top: 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.question-submit:disabled {
+  color: var(--dim-2);
+  border-color: var(--border-2);
+  cursor: default;
+}
+
+.question-answer {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.msg.question.answered .question-option:not(.selected) {
+  opacity: 0.4;
+}
+
+.msg.question.past {
+  opacity: 0.7;
+}
+
 .msg.thinking .label {
   color: var(--dim-2);
   font-size: 10px;

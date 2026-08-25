@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
-import { closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
+import { answerAgent, closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
 import {
   closeRun,
   detectRunCommand,
@@ -320,6 +320,11 @@ app.whenReady().then(() => {
     },
   );
   ipcMain.handle('agent:interrupt', (_event, cwd: string) => interruptAgent(cwd));
+  ipcMain.handle(
+    'agent:answer',
+    (_event, req: { cwd: string; id: string; selection: string }) =>
+      answerAgent(req.cwd, req.id, req.selection),
+  );
 
   ipcMain.handle('run:detect', (_event, cwd: string) => detectRunCommand(cwd));
   ipcMain.handle('run:start', (_event, cwd: string, command?: string) => startRun(cwd, command));
