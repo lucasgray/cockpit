@@ -28,6 +28,9 @@ function statHtml(wt: Worktree): string {
   return `<span class="wt-stat" title="uncommitted lines changed">${parts.join('')}</span>`;
 }
 
+/** Length of one pulse cycle — keep in sync with `wt-pulse` in style.css. */
+const PULSE_MS = 1200;
+
 export class WorktreeRail {
   private container: HTMLElement;
   private onSelect: (wt: Worktree) => void;
@@ -221,6 +224,13 @@ export class WorktreeRail {
     const running = this.running.has(wt.path);
     const state = running ? 'running' : wt.dirty ? 'dirty' : 'clean';
     dot.className = `wt-dot ${state}`;
+    // A refresh rebuilds the rail's DOM every 1.5s, and a brand-new element
+    // starts its animation at 0% — which chops the pulse partway through its
+    // second cycle. Seeking into the cycle with a negative delay picks it up
+    // where an uninterrupted dot would be. The offset comes off one clock
+    // shared by every dot, so concurrent turns pulse together rather than each
+    // at whatever phase its turn happened to start on.
+    dot.style.animationDelay = running ? `-${performance.now() % PULSE_MS}ms` : '';
     dot.title = running
       ? 'agent is working'
       : wt.dirty
