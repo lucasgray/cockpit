@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
-import type { Worktree } from '../src/bridge';
+import type { Worktree, WorktreeCreateResult } from '../src/bridge';
 import { closeAllAgents, interruptAgent, resetAgent, runAgent } from './agentRunner';
 
 const execFileAsync = promisify(execFile);
@@ -13,6 +13,49 @@ const PROJECT_ROOT =
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 4 * 1024 * 1024 });
   return stdout;
+}
+
+const BOOTSTRAP = process.env.COCKPIT_BOOTSTRAP || 'npm install';
+
+function dirForBranch(branch: string): string {
+  const safe = branch.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'worktree';
+  return path.join(path.dirname(PROJECT_ROOT), `${path.basename(PROJECT_ROOT)}--${safe}`);
+}
+
+async function branchExists(branch: string): Promise<boolean> {
+  try {
+    await git(PROJECT_ROOT, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function createWorktree(branch: string): Promise<WorktreeCreateResult> {
+  const name = branch.trim();
+  if (!name) return { ok: false, error: 'Branch name required' };
+
+  const dir = dirForBranch(name);
+  try {
+    const base = ['worktree', 'add', dir];
+    const args = (await branchExists(name)) ? [...base, name] : [...base, '-b', name];
+    await git(PROJECT_ROOT, args);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message.trim() : String(error) };
+  }
+
+  // Bootstrap in the background: the worktree is editable immediately; only
+  // running tests/builds there waits for the install to finish.
+  const [cmd, ...cmdArgs] = BOOTSTRAP.split(' ');
+  try {
+    const child = spawn(cmd, cmdArgs, { cwd: dir, detached: true, stdio: 'ignore' });
+    child.on('error', () => {});
+    child.unref();
+  } catch {
+    // No bootstrap command available — the worktree still exists.
+  }
+
+  return { ok: true, path: dir, branch: name };
 }
 
 async function listWorktrees(): Promise<Worktree[]> {
@@ -72,6 +115,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   ipcMain.handle('worktrees:list', () => listWorktrees());
+  ipcMain.handle('worktrees:create', (_event, branch: string) => createWorktree(branch));
   ipcMain.handle(
     'agent:run',
     (event, req: { prompt: string; cwd: string; runId: string }) =>

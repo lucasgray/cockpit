@@ -14,9 +14,17 @@ export type AgentRunRequest = {
   cwd: string;
 };
 
+export type WorktreeCreateResult = {
+  ok: boolean;
+  path?: string;
+  branch?: string;
+  error?: string;
+};
+
 export type CockpitBridge = {
   worktrees: {
     list: () => Promise<Worktree[]>;
+    create: (branch: string) => Promise<WorktreeCreateResult>;
   };
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;
