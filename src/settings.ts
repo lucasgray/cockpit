@@ -8,6 +8,8 @@
  * options, the renderer reads it to draw the Settings panel.
  */
 
+import { DEFAULT_PORT } from './runConfig';
+
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'dontAsk';
 
 export const PERMISSION_MODES: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'dontAsk'];
@@ -31,6 +33,29 @@ export type CockpitSettings = {
   inheritProjectInstructions: boolean;
   /** Explicit path to the Claude Code binary, or '' to auto-discover it. */
   claudePath: string;
+  /**
+   * Shell command the ▶ Run button starts in the active worktree, or '' to
+   * resolve it from the repo (package.json scripts, Procfile, Makefile).
+   *
+   * An override rather than a default: leaving it empty means every repo the
+   * cockpit opens gets the right command without being told, and setting it
+   * pins one repo that guesses wrong. See `src/runConfig.ts`.
+   */
+  runCommand: string;
+  /**
+   * Shell command run in a freshly created worktree, or '' for the default
+   * (`$COCKPIT_BOOTSTRAP`, else `npm install`).
+   *
+   * Receives the worktree's newly assigned port as `COCKPIT_PORT` and `PORT`, so
+   * a project that needs the port baked into a file — an `.env`, a compose
+   * override — can write it here, at the one moment the worktree is new.
+   */
+  worktreeCreateHook: string;
+  /**
+   * Lowest port handed out to a worktree. Each one gets its own, counting up
+   * from here, so two worktrees can run at the same time without colliding.
+   */
+  portBase: number;
 };
 
 export const DEFAULT_SETTINGS: CockpitSettings = {
@@ -40,6 +65,9 @@ export const DEFAULT_SETTINGS: CockpitSettings = {
   instructions: '',
   inheritProjectInstructions: false,
   claudePath: '',
+  runCommand: '',
+  worktreeCreateHook: '',
+  portBase: DEFAULT_PORT,
 };
 
 function str(value: unknown, fallback: string): string {
@@ -51,6 +79,7 @@ export function normalizeSettings(raw: unknown): CockpitSettings {
   const input = (raw && typeof raw === 'object' ? raw : {}) as Partial<CockpitSettings>;
   const mode = input.permissionMode;
   const turns = Number(input.maxTurns);
+  const base = Number(input.portBase);
 
   return {
     model: str(input.model, DEFAULT_SETTINGS.model).trim(),
@@ -61,5 +90,9 @@ export function normalizeSettings(raw: unknown): CockpitSettings {
     instructions: str(input.instructions, DEFAULT_SETTINGS.instructions),
     inheritProjectInstructions: input.inheritProjectInstructions === true,
     claudePath: str(input.claudePath, DEFAULT_SETTINGS.claudePath).trim(),
+    runCommand: str(input.runCommand, DEFAULT_SETTINGS.runCommand).trim(),
+    worktreeCreateHook: str(input.worktreeCreateHook, DEFAULT_SETTINGS.worktreeCreateHook).trim(),
+    // Below 1024 needs root to bind, and the range has to leave room to count up.
+    portBase: Number.isFinite(base) ? Math.min(60_000, Math.max(1_024, Math.round(base))) : DEFAULT_PORT,
   };
 }

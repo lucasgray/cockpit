@@ -334,6 +334,27 @@ body {
   }
 }
 
+/* The dev-server port, at the right of the name line. Dim while merely
+   assigned, lit while something is serving on it — a different axis from the
+   gutter dot, which is about the agent rather than the server. */
+.wt-port {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim-2);
+}
+
+.wt-port.live {
+  color: #6bbf74;
+}
+
+.wt-bottom {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .wt-branch {
   font-size: 11px;
   color: var(--dim);
@@ -341,6 +362,24 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Churn counts hold their width; the branch name is what gets truncated. */
+.wt-stat {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  gap: 5px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.wt-add {
+  color: #6bbf74;
+}
+
+.wt-del {
+  color: #e07b86;
 }
 
 /* Sits directly under the dot. Stays out of the way until the row is hovered
@@ -911,6 +950,80 @@ body {
   color: var(--dim);
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
   white-space: normal;
+}
+
+/* ---- Run pane ---------------------------------------------------------- */
+
+.run-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 6px;
+}
+
+/* The command field is the config surface: empty means auto-detect, and the
+   resolved command shows through as placeholder text. */
+.run-cmd {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  padding: 6px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.run-cmd:focus {
+  border-color: var(--accent);
+}
+
+.run-cmd::placeholder {
+  color: var(--dim-2);
+}
+
+.run-cmd:disabled {
+  opacity: 0.5;
+}
+
+.run-go {
+  flex: none;
+}
+
+.run-source {
+  padding: 0 12px 8px;
+  font-size: 11px;
+  color: var(--dim);
+  min-height: 15px;
+}
+
+.run-out {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 14px 14px;
+  background: var(--code-bg);
+  border-top: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  /* Long dev-server URLs and stack traces wrap rather than scroll sideways. */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.run-err {
+  color: var(--danger);
 }
 
 .statusline {

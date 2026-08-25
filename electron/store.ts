@@ -27,6 +27,10 @@ const SCHEMA = `
     session_id TEXT,
     updated_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS worktree_ports (
+    cwd  TEXT    PRIMARY KEY,
+    port INTEGER NOT NULL UNIQUE
+  );
   CREATE TABLE IF NOT EXISTS events (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
     cwd   TEXT    NOT NULL,
@@ -118,6 +122,39 @@ export class Store {
   setSelectedWorktree(cwd: string | null) {
     if (cwd === null) this.db.prepare('DELETE FROM meta WHERE key = ?').run('selectedWorktree');
     else this.writeMeta('selectedWorktree', cwd);
+  }
+
+  // ---- worktree ports ----------------------------------------------------
+
+  /**
+   * A worktree's dev-server port is sticky: assigned once and remembered, so a
+   * URL you bookmarked keeps pointing at the same branch across restarts.
+   */
+  port(cwd: string): number | null {
+    const row = this.db.prepare('SELECT port FROM worktree_ports WHERE cwd = ?').get(cwd) as
+      | { port: number }
+      | undefined;
+    return row?.port ?? null;
+  }
+
+  setPort(cwd: string, port: number) {
+    this.db
+      .prepare(
+        `INSERT INTO worktree_ports (cwd, port) VALUES (?, ?)
+         ON CONFLICT(cwd) DO UPDATE SET port = excluded.port`,
+      )
+      .run(cwd, port);
+  }
+
+  /** Every port already handed out — what a new assignment has to avoid. */
+  assignedPorts(): number[] {
+    const rows = this.db.prepare('SELECT port FROM worktree_ports').all() as { port: number }[];
+    return rows.map((row) => row.port);
+  }
+
+  /** Called when a worktree is removed, so its port returns to the pool. */
+  releasePort(cwd: string) {
+    this.db.prepare('DELETE FROM worktree_ports WHERE cwd = ?').run(cwd);
   }
 
   // ---- sessions ----------------------------------------------------------

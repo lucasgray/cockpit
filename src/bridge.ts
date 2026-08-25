@@ -1,4 +1,6 @@
 import type { AgentEvent } from './agent/protocol';
+import type { CockpitSettings } from './settings';
+import type { RunChunk, RunCommand, RunStatus, RunEvent } from './runConfig';
 
 export type Worktree = {
   path: string;
@@ -7,6 +9,14 @@ export type Worktree = {
   head: string;
   isMain: boolean;
   dirty: boolean;
+  /** Uncommitted line counts, new files included. Both 0 on a clean worktree. */
+  added: number;
+  removed: number;
+  /** This worktree's own dev-server port, so siblings don't collide. */
+  port: number;
+  /** Whether a run is serving in this worktree right now. Distinct from the
+   * rail's agent-running dot: serving is about the dev server, not the turn. */
+  serving: boolean;
 };
 
 export type AgentRunRequest = {
@@ -18,11 +28,26 @@ export type WorktreeCreateResult = {
   ok: boolean;
   path?: string;
   branch?: string;
+  /** The port assigned to the new worktree, before its create hook ran. */
+  port?: number;
   error?: string;
 };
 
 export type WorktreeRemoveResult = {
   ok: boolean;
+  error?: string;
+};
+
+/** How a worktree's create hook finished. Arrives well after `create` resolves. */
+export type WorktreeHookResult = {
+  cwd: string;
+  branch: string;
+  command: string;
+  port: number;
+  /** Exit code, or null when the hook could not be spawned at all. */
+  code: number | null;
+  /** Last few KB of combined output — enough to see why a hook failed. */
+  tail: string;
   error?: string;
 };
 
@@ -34,10 +59,28 @@ export type CockpitBridge = {
     diff: (cwd: string) => Promise<string>;
     /** Delete a non-main worktree and its branch, throwing the work away. */
     remove: (cwd: string) => Promise<WorktreeRemoveResult>;
+    /** Subscribe to create-hook completions. Returns an unsubscribe function. */
+    onHook: (listener: (result: WorktreeHookResult) => void) => () => void;
   };
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;
     interrupt: (cwd: string) => Promise<void>;
+  };
+  /**
+   * Starting the project a worktree holds — one run per worktree, concurrently,
+   * each on its own assigned port. Starting one already up restarts it.
+   */
+  run: {
+    /** The command that would run, and where it was resolved from. */
+    detect: (cwd: string) => Promise<RunCommand>;
+    /** Start in `cwd`; `command` overrides resolution for this run only. */
+    start: (cwd: string, command?: string) => Promise<RunStatus>;
+    stop: (cwd: string) => Promise<RunStatus>;
+    status: (cwd: string) => Promise<RunStatus>;
+    /** Output so far, for repopulating the pane when it is reopened. */
+    buffer: (cwd: string) => Promise<RunChunk[]>;
+    /** Subscribe to status and output for every worktree. Returns unsubscribe. */
+    onEvent: (listener: (event: RunEvent) => void) => () => void;
   };
   /**
    * The app's own SQLite state, in the main process. Transcripts are kept as the
@@ -49,6 +92,8 @@ export type CockpitBridge = {
     clearTranscript: (cwd: string) => Promise<void>;
     selectedWorktree: () => Promise<string | null>;
     setSelectedWorktree: (cwd: string | null) => Promise<void>;
+    settings: () => Promise<CockpitSettings>;
+    saveSettings: (patch: Partial<CockpitSettings>) => Promise<CockpitSettings>;
   };
 };
 

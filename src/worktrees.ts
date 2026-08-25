@@ -14,6 +14,34 @@ function writeStoredPath(path: string | null) {
   window.cockpit?.store.setSelectedWorktree(path);
 }
 
+/**
+ * Uncommitted churn, sitting opposite the branch name. A clean worktree gets
+ * nothing at all rather than a "+0 -0" that reads like a real measurement.
+ */
+function statHtml(wt: Worktree): string {
+  if (!wt.added && !wt.removed) return '';
+  const parts = [
+    wt.added ? `<span class="wt-add">+${wt.added}</span>` : '',
+    wt.removed ? `<span class="wt-del">-${wt.removed}</span>` : '',
+  ];
+  return `<span class="wt-stat" title="uncommitted lines changed">${parts.join('')}</span>`;
+}
+
+/**
+ * The worktree's own dev-server port, lit while something is serving on it.
+ *
+ * Distinct from the gutter dot, which is about the *agent*: a worktree can be
+ * serving with no turn in flight, or mid-turn with nothing served. With runs
+ * going in several worktrees at once this is the only thing that says which are
+ * up and where to reach them.
+ */
+function portHtml(wt: Worktree): string {
+  if (!wt.port) return '';
+  const live = wt.serving ? ' live' : '';
+  const title = wt.serving ? `serving on http://127.0.0.1:${wt.port}` : `assigned port ${wt.port}`;
+  return `<span class="wt-port${live}" title="${title}">:${wt.port}</span>`;
+}
+
 export class WorktreeRail {
   private container: HTMLElement;
   private onSelect: (wt: Worktree) => void;
@@ -130,8 +158,12 @@ export class WorktreeRail {
       <div class="wt-top">
         <span class="wt-name">${wt.name}</span>
         ${wt.isMain ? '<span class="wt-badge">main</span>' : ''}
+        ${portHtml(wt)}
       </div>
-      <div class="wt-branch">${wt.branch}</div>`;
+      <div class="wt-bottom">
+        <span class="wt-branch">${wt.branch}</span>
+        ${statHtml(wt)}
+      </div>`;
     item.addEventListener('click', () => {
       this.confirmPath = null;
       this.activePath = wt.path;

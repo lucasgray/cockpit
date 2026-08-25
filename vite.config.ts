@@ -1,10 +1,16 @@
 import { defineConfig } from 'vite';
 import { anthropicAgentPlugin } from './src/agent/backend';
+import { resolvePort } from './src/runConfig';
 
 export default defineConfig({
   server: {
     host: '127.0.0.1',
-    port: 5273,
+    // The cockpit assigns each worktree its own port and injects it as
+    // COCKPIT_PORT, so sibling worktrees can serve at the same time. Falls back
+    // to the default when run by hand.
+    port: resolvePort(process.env),
+    // Left strict on purpose: if the assigned port is taken, failing loudly is
+    // better than silently serving on another one the window won't be pointed at.
     strictPort: true,
     // Auto-reload is OFF on purpose: the app hosts live Claude sessions, and an
     // automatic reload restarts them mid-turn. Polling still runs so the module

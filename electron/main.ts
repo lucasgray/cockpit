@@ -1,11 +1,26 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { execFile, spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
 import { closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
+import {
+  closeRun,
+  detectRunCommand,
+  onRunEvent,
+  runBuffer,
+  runEnv,
+  runStatus,
+  runningWorktrees,
+  startRun,
+  stopRun,
+} from './runner';
+import { ensurePort } from './ports';
 import { getStore, openStore } from './store';
+import type { CockpitSettings } from '../src/settings';
+import { resolvePort } from '../src/runConfig';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +32,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+/** Fallback create hook when settings don't pin one. */
 const BOOTSTRAP = process.env.COCKPIT_BOOTSTRAP || 'npm install';
 
 function dirForBranch(branch: string): string {
@@ -33,6 +49,51 @@ async function branchExists(branch: string): Promise<boolean> {
   }
 }
 
+/**
+ * Run the worktree-create hook in a brand-new worktree.
+ *
+ * Backgrounded on purpose: the worktree is editable the moment git returns, and
+ * only running something in it needs the install finished. Output is piped so a
+ * failing hook can say why instead of vanishing — the tail goes to the renderer
+ * when it exits.
+ */
+function runCreateHook(dir: string, branch: string, port: number) {
+  const command = getStore().settings().worktreeCreateHook || BOOTSTRAP;
+  if (!command) return;
+
+  let tail = '';
+  const child = spawn(command, {
+    cwd: dir,
+    shell: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      ...runEnv(port),
+      // The hook's whole reason for existing: it can bake the port into a file
+      // at the one moment the worktree is new.
+      COCKPIT_WORKTREE: dir,
+      COCKPIT_BRANCH: branch,
+    },
+  });
+
+  const collect = (data: Buffer) => {
+    tail = (tail + data.toString()).slice(-4_000);
+  };
+  child.stdout?.on('data', collect);
+  child.stderr?.on('data', collect);
+
+  const report = (code: number | null, error?: string) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send('worktrees:hook', { cwd: dir, branch, command, port, code, tail, error });
+      }
+    }
+  };
+
+  child.on('error', (error) => report(null, error.message));
+  child.on('exit', (code) => report(code));
+}
+
 async function createWorktree(branch: string): Promise<WorktreeCreateResult> {
   const name = branch.trim();
   if (!name) return { ok: false, error: 'Branch name required' };
@@ -46,18 +107,11 @@ async function createWorktree(branch: string): Promise<WorktreeCreateResult> {
     return { ok: false, error: error instanceof Error ? error.message.trim() : String(error) };
   }
 
-  // Bootstrap in the background: the worktree is editable immediately; only
-  // running tests/builds there waits for the install to finish.
-  const [cmd, ...cmdArgs] = BOOTSTRAP.split(' ');
-  try {
-    const child = spawn(cmd, cmdArgs, { cwd: dir, detached: true, stdio: 'ignore' });
-    child.on('error', () => {});
-    child.unref();
-  } catch {
-    // No bootstrap command available — the worktree still exists.
-  }
+  // Assigned before the hook runs, so the hook is the first thing that sees it.
+  const port = await ensurePort(dir);
+  runCreateHook(dir, name, port);
 
-  return { ok: true, path: dir, branch: name };
+  return { ok: true, path: dir, branch: name, port };
 }
 
 /** Run git and return stdout even on a non-zero exit (diff exits 1 on changes). */
@@ -87,10 +141,48 @@ async function worktreeDiff(cwd: string): Promise<string> {
   return out.trim();
 }
 
+/**
+ * Every line of a new file is an insertion, so untracked files are counted here
+ * rather than diffed — one read beats one `git diff --no-index` per file. Binary
+ * content has no lines to count, which is also what git reports for it.
+ */
+async function countLines(file: string): Promise<number> {
+  try {
+    const buf = await readFile(file);
+    if (!buf.length || buf.includes(0)) return 0;
+    let lines = 0;
+    for (const byte of buf) if (byte === 0x0a) lines++;
+    return buf[buf.length - 1] === 0x0a ? lines : lines + 1;
+  } catch {
+    return 0;
+  }
+}
+
+/** The +/- behind the dirty flag: tracked edits plus every new untracked file. */
+async function worktreeStat(cwd: string): Promise<{ added: number; removed: number }> {
+  let added = 0;
+  let removed = 0;
+
+  for (const line of (await gitOut(cwd, ['--no-pager', 'diff', '--numstat', 'HEAD'])).split('\n')) {
+    const [add, del] = line.split('\t');
+    // Binary files report "-" for both counts; Number() makes those NaN → 0.
+    added += Number(add) || 0;
+    removed += Number(del) || 0;
+  }
+
+  const untracked = (await gitOut(cwd, ['ls-files', '--others', '--exclude-standard'])).trim();
+  for (const file of untracked ? untracked.split('\n').filter(Boolean).slice(0, 200) : []) {
+    added += await countLines(path.join(cwd, file));
+  }
+
+  return { added, removed };
+}
+
 async function listWorktrees(): Promise<Worktree[]> {
   const out = await git(PROJECT_ROOT, ['worktree', 'list', '--porcelain']);
   const blocks = out.trim().split('\n\n');
   const worktrees: Worktree[] = [];
+  const serving = new Set(runningWorktrees());
 
   for (const [index, block] of blocks.entries()) {
     let wtPath = '';
@@ -112,6 +204,9 @@ async function listWorktrees(): Promise<Worktree[]> {
       // worktree may be locked/missing — treat as clean
     }
 
+    // Only a dirty worktree has anything to count.
+    const { added, removed } = dirty ? await worktreeStat(wtPath) : { added: 0, removed: 0 };
+
     worktrees.push({
       path: wtPath,
       name: path.basename(wtPath),
@@ -119,6 +214,13 @@ async function listWorktrees(): Promise<Worktree[]> {
       head: head.slice(0, 7),
       isMain: index === 0,
       dirty,
+      added,
+      removed,
+      // Assigned here rather than on first run so the number is visible, and
+      // stable, before anyone presses ▶ Run. Worktrees made outside the cockpit
+      // get one on the first listing that sees them.
+      port: await ensurePort(wtPath),
+      serving: serving.has(wtPath),
     });
   }
   return worktrees;
@@ -141,12 +243,13 @@ async function removeWorktree(cwd: string): Promise<WorktreeRemoveResult> {
   if (!target) return { ok: false, error: 'Worktree not found' };
   if (target.isMain) return { ok: false, error: 'The main worktree cannot be removed' };
 
-  // The session holds a CLI subprocess with this directory as its cwd — close it
-  // before the directory disappears from under it. Bounded, because a CLI that
-  // won't exit must not be able to wedge the removal: worst case it's orphaned
-  // and reaped at quit, which beats a button that never comes back.
+  // The session holds a CLI subprocess with this directory as its cwd, and a run
+  // may hold a dev server on it too — close both before the directory disappears
+  // from under them. Bounded, because neither must be able to wedge the removal:
+  // worst case they're orphaned and reaped at quit, which beats a button that
+  // never comes back.
   await Promise.race([
-    closeAgent(cwd),
+    Promise.allSettled([closeAgent(cwd), stopRun(cwd)]),
     new Promise((resolve) => setTimeout(resolve, 5000)),
   ]);
 
@@ -161,7 +264,10 @@ async function removeWorktree(cwd: string): Promise<WorktreeRemoveResult> {
     });
   }
 
-  await getStore().clearTranscript(cwd);
+  getStore().clearTranscript(cwd);
+  // The port goes back in the pool — otherwise a long-lived cockpit would walk
+  // its assignments upward forever as worktrees come and go.
+  getStore().releasePort(cwd);
   return { ok: true };
 }
 
@@ -176,8 +282,16 @@ function createWindow() {
     },
   });
 
+  // A run belongs to the app, not to a call, so its events go straight to the
+  // window. Guarded because output keeps arriving while the window tears down.
+  onRunEvent((event) => {
+    if (!win.isDestroyed()) win.webContents.send('run:event', event);
+  });
+
   if (!app.isPackaged) {
-    win.loadURL(process.env.COCKPIT_DEV_URL || 'http://127.0.0.1:5273');
+    // When the cockpit is itself started by a cockpit, COCKPIT_PORT says which
+    // vite belongs to this worktree — the window must not load a sibling's.
+    win.loadURL(process.env.COCKPIT_DEV_URL || `http://127.0.0.1:${resolvePort(process.env)}`);
   } else {
     win.loadFile(path.join(__dirname, '../dist/index.html'));
   }
@@ -207,11 +321,21 @@ app.whenReady().then(() => {
   );
   ipcMain.handle('agent:interrupt', (_event, cwd: string) => interruptAgent(cwd));
 
+  ipcMain.handle('run:detect', (_event, cwd: string) => detectRunCommand(cwd));
+  ipcMain.handle('run:start', (_event, cwd: string, command?: string) => startRun(cwd, command));
+  ipcMain.handle('run:stop', (_event, cwd: string) => stopRun(cwd));
+  ipcMain.handle('run:status', (_event, cwd: string) => runStatus(cwd));
+  ipcMain.handle('run:buffer', (_event, cwd: string) => runBuffer(cwd));
+
   ipcMain.handle('store:transcript', (_event, cwd: string) => getStore().transcript(cwd));
   ipcMain.handle('store:clearTranscript', (_event, cwd: string) => getStore().clearTranscript(cwd));
   ipcMain.handle('store:selectedWorktree', () => getStore().selectedWorktree());
   ipcMain.handle('store:setSelectedWorktree', (_event, cwd: string | null) =>
     getStore().setSelectedWorktree(cwd),
+  );
+  ipcMain.handle('store:settings', () => getStore().settings());
+  ipcMain.handle('store:saveSettings', (_event, patch: Partial<CockpitSettings>) =>
+    getStore().saveSettings(patch),
   );
 
   createWindow();
@@ -224,13 +348,14 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// Live sessions own CLI subprocesses — tear them down instead of orphaning them.
+// Live sessions and dev servers both own subprocesses — tear them down instead
+// of orphaning them holding a port.
 let quitting = false;
 app.on('before-quit', (event) => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
-  closeAllAgents()
+  Promise.allSettled([closeAllAgents(), closeRun()])
     .finally(() => getStore().close())
     .finally(() => app.quit());
 });
