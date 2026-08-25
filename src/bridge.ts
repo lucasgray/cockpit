@@ -21,17 +21,23 @@ export type WorktreeCreateResult = {
   error?: string;
 };
 
+export type WorktreeRemoveResult = {
+  ok: boolean;
+  error?: string;
+};
+
 export type CockpitBridge = {
   worktrees: {
     list: () => Promise<Worktree[]>;
     create: (branch: string) => Promise<WorktreeCreateResult>;
     /** Unified `git diff` of the worktree's uncommitted changes (+ new files). */
     diff: (cwd: string) => Promise<string>;
+    /** Delete a non-main worktree and its branch, throwing the work away. */
+    remove: (cwd: string) => Promise<WorktreeRemoveResult>;
   };
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;
     interrupt: (cwd: string) => Promise<void>;
-    reset: (cwd: string) => Promise<void>;
   };
   /**
    * The app's own SQLite state, in the main process. Transcripts are kept as the

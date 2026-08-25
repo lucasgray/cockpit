@@ -3,8 +3,8 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
-import type { Worktree, WorktreeCreateResult } from '../src/bridge';
-import { closeAllAgents, interruptAgent, resetAgent, runAgent } from './agentRunner';
+import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
+import { closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
 import { getStore, openStore } from './store';
 
 const execFileAsync = promisify(execFile);
@@ -124,6 +124,47 @@ async function listWorktrees(): Promise<Worktree[]> {
   return worktrees;
 }
 
+/** git puts the useful part of a failure on stderr; the message wraps the argv. */
+function gitError(error: unknown): string {
+  const stderr = (error as { stderr?: string }).stderr;
+  if (typeof stderr === 'string' && stderr.trim()) return stderr.trim();
+  return error instanceof Error ? error.message.trim() : String(error);
+}
+
+/**
+ * Delete a non-main worktree along with its branch. Uncommitted work goes with
+ * it — this is the throw-it-away path, and the UI confirms before calling.
+ */
+async function removeWorktree(cwd: string): Promise<WorktreeRemoveResult> {
+  const worktrees = await listWorktrees();
+  const target = worktrees.find((wt) => wt.path === cwd);
+  if (!target) return { ok: false, error: 'Worktree not found' };
+  if (target.isMain) return { ok: false, error: 'The main worktree cannot be removed' };
+
+  // The session holds a CLI subprocess with this directory as its cwd — close it
+  // before the directory disappears from under it. Bounded, because a CLI that
+  // won't exit must not be able to wedge the removal: worst case it's orphaned
+  // and reaped at quit, which beats a button that never comes back.
+  await Promise.race([
+    closeAgent(cwd),
+    new Promise((resolve) => setTimeout(resolve, 5000)),
+  ]);
+
+  try {
+    await git(PROJECT_ROOT, ['worktree', 'remove', '--force', cwd]);
+  } catch (error) {
+    return { ok: false, error: gitError(error) };
+  }
+  if (target.branch !== '(detached)') {
+    await git(PROJECT_ROOT, ['branch', '-D', target.branch]).catch(() => {
+      // Worktree is gone either way; a stuck branch is a leftover, not a failure.
+    });
+  }
+
+  await getStore().clearTranscript(cwd);
+  return { ok: true };
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1400,
@@ -149,6 +190,7 @@ app.whenReady().then(() => {
   ipcMain.handle('worktrees:list', () => listWorktrees());
   ipcMain.handle('worktrees:create', (_event, branch: string) => createWorktree(branch));
   ipcMain.handle('worktrees:diff', (_event, cwd: string) => worktreeDiff(cwd));
+  ipcMain.handle('worktrees:remove', (_event, cwd: string) => removeWorktree(cwd));
   ipcMain.handle(
     'agent:run',
     (event, req: { prompt: string; cwd: string; runId: string }) => {
@@ -164,7 +206,6 @@ app.whenReady().then(() => {
     },
   );
   ipcMain.handle('agent:interrupt', (_event, cwd: string) => interruptAgent(cwd));
-  ipcMain.handle('agent:reset', (_event, cwd: string) => resetAgent(cwd));
 
   ipcMain.handle('store:transcript', (_event, cwd: string) => getStore().transcript(cwd));
   ipcMain.handle('store:clearTranscript', (_event, cwd: string) => getStore().clearTranscript(cwd));

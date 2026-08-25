@@ -36,8 +36,13 @@ type Pane = {
   bubbleBody: HTMLElement | null;
   /** Markdown source for the open bubble, re-rendered as deltas land. */
   bubbleText: string;
+  /** Characters of bubbleText revealed so far — the text typewriters in. */
+  bubbleShown: number;
   tools: Map<string, HTMLElement>;
   todos: HTMLElement | null;
+  /** The "thinking" spinner under the prompt (+ its interval), while it thinks. */
+  spinner: HTMLElement | null;
+  spinnerTimer: number;
   /** Whether the stored transcript has been replayed into this pane yet. */
   restored: boolean;
 };
@@ -56,6 +61,8 @@ export class Cockpit {
   private dirty = new Set<Pane>();
   /** Pending render frame, or 0 when nothing is scheduled. */
   private frame = 0;
+  /** Pending typewriter-reveal frame, or 0 when the text has caught up. */
+  private revealFrame = 0;
 
   private thoughts: monaco.editor.IModelDeltaDecoration[] = [];
   private thoughtCollection: monaco.editor.IEditorDecorationsCollection | null = null;
@@ -113,8 +120,11 @@ export class Cockpit {
         bubbleType: null,
         bubbleBody: null,
         bubbleText: '',
+        bubbleShown: 0,
         tools: new Map(),
         todos: null,
+        spinner: null,
+        spinnerTimer: 0,
         restored: false,
       };
       this.panes.set(key, pane);
@@ -140,7 +150,9 @@ export class Cockpit {
   }
 
   private draw(pane: Pane) {
-    if (pane.bubbleBody) pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText);
+    if (pane.bubbleBody) {
+      pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText.slice(0, pane.bubbleShown));
+    }
   }
 
   /**
@@ -149,19 +161,33 @@ export class Cockpit {
    * scheduled render might otherwise land after the bubble had been let go.
    */
   private closeBubble() {
-    if (this.dirty.delete(this.pane)) this.draw(this.pane);
+    // Snap the typewriter to the end so a bubble never freezes half-revealed.
+    if (this.revealFrame) {
+      cancelAnimationFrame(this.revealFrame);
+      this.revealFrame = 0;
+    }
+    this.pane.bubbleShown = this.pane.bubbleText.length;
+    this.dirty.delete(this.pane);
+    if (this.pane.bubbleBody) this.draw(this.pane);
     this.pane.bubbleType = null;
     this.pane.bubbleBody = null;
     this.pane.bubbleText = '';
+    this.pane.bubbleShown = 0;
   }
 
   /** Drop a pane's drawn transcript and every live handle into it. */
   private blankPane(pane: Pane) {
     this.dirty.delete(pane);
+    if (pane.spinnerTimer) {
+      clearInterval(pane.spinnerTimer);
+      pane.spinnerTimer = 0;
+    }
+    pane.spinner = null;
     pane.el.innerHTML = '';
     pane.bubbleType = null;
     pane.bubbleBody = null;
     pane.bubbleText = '';
+    pane.bubbleShown = 0;
     pane.tools.clear();
     pane.todos = null;
   }
@@ -216,12 +242,18 @@ export class Cockpit {
     this.scrollDown();
   }
 
-  /** Clear one transcript (the model-side session is dropped separately). */
-  clearPane(key: string) {
-    const pane = this.paneFor(key);
+  /**
+   * Forget a transcript entirely — for a worktree that no longer exists. The
+   * pane has to go rather than just be blanked, or a worktree recreated at the
+   * same path would reopen onto the dead one's conversation.
+   */
+  dropPane(key: string) {
+    const pane = this.panes.get(key);
+    if (!pane) return;
     this.blankPane(pane);
-    pane.restored = true;
-    window.cockpit?.store.clearTranscript(key);
+    pane.el.remove();
+    this.panes.delete(key);
+    if (this.pane === pane) this.showPane('default');
   }
 
   /** Full teardown of the visible transcript plus the diff surface. */
@@ -291,13 +323,25 @@ export class Cockpit {
    * than off a live run — same transcript, but nothing to animate.
    */
   async handle(event: AgentEvent, replaying = false) {
+    // The spinner means "thinking, nothing shown yet" — any real output ends it.
+    if (!replaying && event.type !== 'user' && event.type !== 'thinking') this.stopSpinner();
     switch (event.type) {
       case 'user':
         this.addUser(event.text);
+        if (!replaying) this.startSpinner();
         break;
       case 'thinking':
+        // Thinking text is usually omitted (empty). Keep the spinner rather than
+        // open a blank bubble; only draw a bubble when there's real content.
+        if (!event.text.trim()) {
+          if (!replaying) this.ensureSpinner();
+          break;
+        }
+        if (!replaying) this.stopSpinner();
+        this.appendDelta('thinking', event.text, replaying);
+        break;
       case 'say':
-        this.appendDelta(event.type, event.text);
+        this.appendDelta('say', event.text, replaying);
         break;
       case 'plan':
         await this.renderPlan(event.title, event.items);
@@ -455,7 +499,7 @@ export class Cockpit {
     if (interrupted) this.addMessage('turn-end').textContent = 'Stopped';
   }
 
-  private appendDelta(type: 'thinking' | 'say', text: string) {
+  private appendDelta(type: 'thinking' | 'say', text: string, instant = false) {
     if (this.pane.bubbleType !== type || !this.pane.bubbleBody) {
       this.closeBubble();
       const wrap = this.addMessage(type);
@@ -471,9 +515,65 @@ export class Cockpit {
       this.pane.bubbleType = type;
       this.pane.bubbleBody = body;
       this.pane.bubbleText = '';
+      this.pane.bubbleShown = 0;
     }
     this.pane.bubbleText += text;
-    this.scheduleRender(this.pane);
+    if (instant) {
+      // Replayed history: show it all at once, nothing to animate.
+      this.pane.bubbleShown = this.pane.bubbleText.length;
+      this.draw(this.pane);
+    } else {
+      this.revealTick(this.pane);
+    }
+  }
+
+  /**
+   * Typewriter: advance the revealed length toward the received text one frame
+   * at a time. The step scales with the backlog so a fast stream still clears
+   * within ~half a second, but never lands fewer than a couple chars per frame.
+   */
+  private revealTick(pane: Pane) {
+    if (this.revealFrame) return;
+    const step = () => {
+      this.revealFrame = 0;
+      const remaining = pane.bubbleText.length - pane.bubbleShown;
+      if (remaining <= 0) return;
+      pane.bubbleShown += Math.max(2, Math.ceil(remaining / 30));
+      if (pane.bubbleShown > pane.bubbleText.length) pane.bubbleShown = pane.bubbleText.length;
+      this.draw(pane);
+      this.scrollDown();
+      if (pane.bubbleShown < pane.bubbleText.length) this.revealFrame = requestAnimationFrame(step);
+    };
+    this.revealFrame = requestAnimationFrame(step);
+  }
+
+  /** A tight |/-\ spinner under the prompt while Claude thinks with no output yet. */
+  private startSpinner() {
+    this.stopSpinner();
+    const el = this.addMessage('spinner');
+    const frames = ['|', '/', '-', '\\'];
+    let i = 0;
+    el.textContent = frames[0];
+    const pane = this.pane;
+    pane.spinner = el;
+    pane.spinnerTimer = window.setInterval(() => {
+      i = (i + 1) % frames.length;
+      el.textContent = frames[i];
+    }, 80);
+  }
+
+  private ensureSpinner() {
+    if (!this.pane.spinner) this.startSpinner();
+  }
+
+  private stopSpinner() {
+    const pane = this.pane;
+    if (pane.spinnerTimer) {
+      clearInterval(pane.spinnerTimer);
+      pane.spinnerTimer = 0;
+    }
+    pane.spinner?.remove();
+    pane.spinner = null;
   }
 
   private async renderPlan(title: string, items: PlanItem[]) {

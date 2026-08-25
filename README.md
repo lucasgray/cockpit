@@ -13,11 +13,9 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5273. Two ways to drive it:
-
-- **▶ Demo** — runs a scripted mock stream. No API key needed.
-- **Send** — sends your prompt to a real Claude stream via the dev-server backend.
-  Falls back to the mock automatically when no key is configured.
+Open http://localhost:5273 and drive it with **Send** — your prompt goes to a real
+Claude stream via the dev-server backend. Falls back to a scripted mock stream
+automatically when no key is configured.
 
 ### Going live (real model)
 
@@ -61,8 +59,17 @@ DOM), so wrapping it in a Tauri/Electron fat client is a shell, not a rewrite.
 | `src/agent/claudeSource.ts` | Client side of the real path: POST `/api/agent`, parse the SSE stream into events. |
 | `src/agent/backend.ts` | Vite plugin: the `/api/agent` endpoint. Calls Claude (streaming + an `edit_file` tool), maps the reply to `AgentEvent`s. |
 | `src/agent/sample.ts` | The file the agent edits, plus the demo snippets. |
+| `src/agent/electronSource.ts` | Desktop path: turns the main process's IPC event pushes back into an `AsyncGenerator<AgentEvent>`. |
 | `src/cockpit.ts` | The cockpit: conversation column, Monaco diff, the edit-streaming engine, and the pinned-thought decorations. |
+| `src/markdown.ts` | Escape-first Markdown renderer for transcript bubbles — nothing the model writes survives as live HTML. |
+| `src/settings.ts` | The cockpit's own agent config (shared by both processes), so behaviour doesn't depend on the operator's dotfiles. |
+| `src/worktrees.ts` | Worktree rail state + the selection that survives reloads. |
+| `src/bridge.ts` | The renderer↔main contract: `Worktree`, `AgentRunRequest`, `CockpitBridge`. |
 | `src/theme.ts` | The `cockpit-dark` Monaco theme — token colors + editor chrome. |
+| `electron/main.ts` | Window + IPC host: `git worktree list`, agent runs, store access. |
+| `electron/preload.ts` | The only thing the renderer can reach — implements `CockpitBridge` over `ipcRenderer`. |
+| `electron/agentRunner.ts` | Drives the Claude Agent SDK `query()` loop, including the PreToolUse diff hook. |
+| `electron/store.ts` | SQLite (`node:sqlite`) in the app's userData dir — transcripts, sessions, settings. Never written into the repo under work. |
 
 ## Ideas to poke at next
 

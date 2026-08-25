@@ -425,8 +425,8 @@ export async function interruptAgent(cwd: string): Promise<void> {
   await sessions.get(cwd)?.interrupt();
 }
 
-/** Drop the conversation for a worktree; the next prompt starts cold. */
-export async function resetAgent(cwd: string): Promise<void> {
+/** Tear down a worktree's session — used when the worktree itself goes away. */
+export async function closeAgent(cwd: string): Promise<void> {
   const session = sessions.get(cwd);
   if (!session) return;
   sessions.delete(cwd);

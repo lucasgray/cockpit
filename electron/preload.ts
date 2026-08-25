@@ -7,6 +7,7 @@ const bridge: CockpitBridge = {
     list: () => ipcRenderer.invoke('worktrees:list'),
     create: (branch: string) => ipcRenderer.invoke('worktrees:create', branch),
     diff: (cwd: string) => ipcRenderer.invoke('worktrees:diff', cwd),
+    remove: (cwd: string) => ipcRenderer.invoke('worktrees:remove', cwd),
   },
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => {
@@ -19,7 +20,6 @@ const bridge: CockpitBridge = {
         .finally(() => ipcRenderer.removeListener(channel, listener));
     },
     interrupt: (cwd: string) => ipcRenderer.invoke('agent:interrupt', cwd),
-    reset: (cwd: string) => ipcRenderer.invoke('agent:reset', cwd),
   },
   store: {
     transcript: (cwd: string) => ipcRenderer.invoke('store:transcript', cwd),

@@ -21,7 +21,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </div>
       <span class="active-wt" id="active-wt">no worktree</span>
       <div class="spacer"></div>
-      <button id="run" class="btn">▶ Demo</button>
     </header>
     <main class="body">
       <aside class="rail">
@@ -36,9 +35,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div class="composer">
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
-            <button id="new" class="btn subtle" title="Drop this worktree's session and start over">
-              ＋ New
-            </button>
             <div class="spacer"></div>
             <button id="stop" class="btn danger" hidden>■ Stop</button>
             <button id="send" class="btn primary">Send</button>
@@ -62,25 +58,35 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 `;
 
 const cockpit = new Cockpit();
-const runBtn = document.getElementById('run') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
-const newBtn = document.getElementById('new') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
 const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 const railBody = document.getElementById('rail-body') as HTMLElement;
 
 let activeWorktree: Worktree | null = null;
 
-const rail = new WorktreeRail(railBody, (wt) => {
-  activeWorktree = wt;
-  activeWtLabel.textContent = wt.name;
-  activeWtLabel.classList.add('set');
-  // Each worktree keeps its own live session; show its transcript, replaying
-  // the stored one the first time it's opened this run.
-  cockpit.showPane(wt.path);
-  cockpit.restorePane(wt.path);
-});
+const rail = new WorktreeRail(
+  railBody,
+  (wt) => {
+    activeWorktree = wt;
+    activeWtLabel.textContent = wt.name;
+    activeWtLabel.classList.add('set');
+    // Each worktree keeps its own live session; show its transcript, replaying
+    // the stored one the first time it's opened this run.
+    cockpit.showPane(wt.path);
+    cockpit.restorePane(wt.path);
+  },
+  (path) => {
+    if (activeWorktree?.path === path) {
+      activeWorktree = null;
+      activeWtLabel.textContent = 'no worktree';
+      activeWtLabel.classList.remove('set');
+      cockpit.resetDiff();
+    }
+    cockpit.dropPane(path);
+  },
+);
 
 const viewLiveBtn = document.getElementById('view-live') as HTMLButtonElement;
 const viewChangesBtn = document.getElementById('view-changes') as HTMLButtonElement;
@@ -127,44 +133,24 @@ async function guarded(label: string, cwd: string | null, work: () => Promise<vo
   if (running) return;
   running = true;
   runningCwd = cwd;
-  runBtn.disabled = true;
-  newBtn.disabled = true;
   sendBtn.disabled = true;
   sendBtn.textContent = label;
   stopBtn.hidden = cwd === null;
+  rail.setRunning(cwd);
   try {
     await work();
   } finally {
     running = false;
     runningCwd = null;
-    runBtn.disabled = false;
-    newBtn.disabled = false;
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';
     stopBtn.hidden = true;
-    runBtn.textContent = '↺ Demo';
+    rail.setRunning(null);
   }
 }
 
-runBtn.addEventListener('click', () =>
-  guarded('…', null, async () => {
-    await runStream(cockpit, mockSource());
-  }),
-);
-
 stopBtn.addEventListener('click', () => {
   if (runningCwd) window.cockpit?.agent.interrupt(runningCwd);
-});
-
-newBtn.addEventListener('click', async () => {
-  if (running) return;
-  if (activeWorktree && window.cockpit?.agent) {
-    await window.cockpit.agent.reset(activeWorktree.path);
-    cockpit.clearPane(activeWorktree.path);
-  } else {
-    cockpit.reset();
-  }
-  cockpit.resetDiff();
 });
 
 async function sendPrompt() {
