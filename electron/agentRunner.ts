@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import type { AgentEvent, TodoItem, TodoStatus } from '../src/agent/protocol';
+import type { AgentEvent, OutboundImage, TodoItem, TodoStatus } from '../src/agent/protocol';
 import { EFFORT_LEVELS, type EffortChoice, type ModelChoice } from '../src/settings';
 
 /** The MCP tool the model uses to ask the operator a question (see start()). */
@@ -574,8 +574,18 @@ class Session {
    * along on every prompt rather than on channels of their own: the operator can
    * flip any of them with no session open, or mid-turn, and either way the value
    * that matters is the one in force when the next turn starts.
+   *
+   * `images` are the screenshots pasted into the composer, already base64. A turn
+   * with none sends a plain string, exactly as before; a turn with some sends
+   * content blocks, the images ahead of the text they were pasted to be asked
+   * about — and the text may be empty, since a screenshot on its own is a prompt.
    */
-  async send(prompt: string, config: TurnConfig, sink: (event: AgentEvent) => void): Promise<void> {
+  async send(
+    prompt: string,
+    images: OutboundImage[],
+    config: TurnConfig,
+    sink: (event: AgentEvent) => void,
+  ): Promise<void> {
     this.sink = sink;
     const changed = {
       thinking: config.thinking !== this.thinking,
@@ -594,9 +604,19 @@ class Session {
       if (changed.effort) await this.applyEffort();
     }
 
+    const content = images.length
+      ? [
+          ...images.map((image) => ({
+            type: 'image' as const,
+            source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
+          })),
+          ...(prompt ? [{ type: 'text' as const, text: prompt }] : []),
+        ]
+      : prompt;
+
     this.inbox.push({
       type: 'user',
-      message: { role: 'user', content: prompt },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     } as SDKUserMessage);
@@ -648,11 +668,11 @@ function sessionFor(cwd: string): Session {
 }
 
 export async function runAgent(
-  req: { prompt: string; cwd: string } & TurnConfig,
+  req: { prompt: string; cwd: string; images?: OutboundImage[] } & TurnConfig,
   send: (event: AgentEvent) => void,
 ): Promise<void> {
   try {
-    await sessionFor(req.cwd).send(req.prompt, req, send);
+    await sessionFor(req.cwd).send(req.prompt, req.images ?? [], req, send);
   } catch (error) {
     send({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     send({ type: 'done' });
