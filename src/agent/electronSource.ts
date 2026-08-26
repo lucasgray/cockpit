@@ -1,7 +1,15 @@
 import type { AgentEvent } from './protocol';
 import type { AgentRunRequest } from '../bridge';
+import type { PastedImage } from '../images';
 
-export function electronSource(req: AgentRunRequest): AsyncGenerator<AgentEvent> {
+/** One turn as the composer has it: the prompt, plus whatever was pasted into it. */
+export type TurnRequest = {
+  prompt: string;
+  cwd: string;
+  images?: PastedImage[];
+};
+
+export function electronSource(req: TurnRequest): AsyncGenerator<AgentEvent> {
   const queue: AgentEvent[] = [];
   let wake: (() => void) | null = null;
   let finished = false;
@@ -12,8 +20,19 @@ export function electronSource(req: AgentRunRequest): AsyncGenerator<AgentEvent>
     wake = null;
   };
 
+  const images = req.images ?? [];
+  // Only the bytes cross to the main process; the data URL behind the thumbnail
+  // is already here and would double the payload for nothing.
+  const outbound: AgentRunRequest = {
+    prompt: req.prompt,
+    cwd: req.cwd,
+    ...(images.length
+      ? { images: images.map(({ mediaType, data }) => ({ mediaType, data })) }
+      : {}),
+  };
+
   window
-    .cockpit!.agent.run(req, push)
+    .cockpit!.agent.run(outbound, push)
     .catch((err) => queue.push({ type: 'error', message: String(err) }))
     .finally(() => {
       finished = true;
@@ -22,8 +41,22 @@ export function electronSource(req: AgentRunRequest): AsyncGenerator<AgentEvent>
     });
 
   return (async function* () {
-    // Echo the prompt so the transcript reads as a conversation.
-    yield { type: 'user', text: req.prompt } as AgentEvent;
+    // Echo the prompt so the transcript reads as a conversation. The screenshots
+    // are echoed inline — the renderer is holding them, and the file the main
+    // process is writing them to may not exist yet.
+    yield {
+      type: 'user',
+      text: req.prompt,
+      ...(images.length
+        ? {
+            images: images.map(({ mediaType, dataUrl }) => ({
+              kind: 'inline' as const,
+              mediaType,
+              dataUrl,
+            })),
+          }
+        : {}),
+    } as AgentEvent;
     while (true) {
       while (queue.length) yield queue.shift()!;
       if (finished) return;

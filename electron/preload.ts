@@ -66,6 +66,8 @@ const bridge: CockpitBridge = {
     openFile: (cwd: string) => ipcRenderer.invoke('store:openFile', cwd),
     setOpenFile: (cwd: string, path: string | null) =>
       ipcRenderer.invoke('store:setOpenFile', cwd, path),
+    draft: (cwd: string) => ipcRenderer.invoke('store:draft', cwd),
+    setDraft: (cwd: string, text: string) => ipcRenderer.invoke('store:setDraft', cwd, text),
     thinking: (cwd: string) => ipcRenderer.invoke('store:thinking', cwd),
     setThinking: (cwd: string, on: boolean) => ipcRenderer.invoke('store:setThinking', cwd, on),
     model: (cwd: string) => ipcRenderer.invoke('store:model', cwd),

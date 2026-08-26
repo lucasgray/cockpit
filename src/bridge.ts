@@ -1,4 +1,4 @@
-import type { AgentEvent } from './agent/protocol';
+import type { AgentEvent, OutboundImage } from './agent/protocol';
 import type { CockpitSettings, EffortChoice, ModelChoice } from './settings';
 import type { RunCommand, RunEvent, RunStatus } from './runConfig';
 
@@ -17,8 +17,15 @@ export type Worktree = {
 };
 
 export type AgentRunRequest = {
+  /** May be empty when the operator sent nothing but screenshots. */
   prompt: string;
   cwd: string;
+  /**
+   * Screenshots pasted into the composer, base64 and already right-sized by the
+   * renderer (see src/images.ts). Only the bytes travel — the thumbnail's data
+   * URL stays on the renderer's side, so the payload isn't carried twice.
+   */
+  images?: OutboundImage[];
 };
 
 export type WorktreeCreateResult = {
@@ -183,6 +190,13 @@ export type CockpitBridge = {
     /** The file each worktree had open, so the app reopens where it was left. */
     openFile: (cwd: string) => Promise<string | null>;
     setOpenFile: (cwd: string, path: string | null) => Promise<void>;
+    /**
+     * The half-written prompt each worktree's composer was left holding, keyed
+     * to the worktree like its transcript — so switching parks one draft and
+     * brings back the other instead of carrying text across.
+     */
+    draft: (cwd: string) => Promise<string>;
+    setDraft: (cwd: string, text: string) => Promise<void>;
     /**
      * Whether each worktree is in thinking mode — the composer's ✳ Thinking
      * toggle. Per-worktree, like the session it drives; the main process reads

@@ -809,6 +809,66 @@ body {
   min-width: 8px;
 }
 
+/* Screenshots pasted into the composer, above the box they'll go out with. The
+   tray is out of the flow entirely until there is one in it, so an empty composer
+   keeps exactly the height it always had. */
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attachments[hidden] {
+  display: none;
+}
+
+.attachment {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--code-bg);
+}
+
+/* Cropped square rather than letterboxed: at 60px the shape of a window is all
+   that's legible anyway, and a uniform row reads as a row. */
+.attachment img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.attachment-drop {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  line-height: 15px;
+  color: var(--text);
+  background: rgba(10, 11, 15, 0.72);
+  border: 1px solid var(--border-2);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.attachment-drop:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Dragging an image over the composer: light the box it's about to land in. */
+.composer.dropping .prompt {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+}
+
 .msg {
   margin-bottom: 16px;
 }
@@ -828,6 +888,36 @@ body {
   color: var(--dim);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Screenshots the operator sent, above the words they came with. Thumbnails, so
+   a turn carrying four of them doesn't push the conversation off the screen —
+   click one and it opens to the full width of the column. */
+.user-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  /* The well's own pre-wrap would otherwise keep a blank line under the strip. */
+  white-space: normal;
+  margin-bottom: 6px;
+}
+
+.user-images:last-child {
+  margin-bottom: 0;
+}
+
+.user-image {
+  max-width: 132px;
+  max-height: 96px;
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+
+.user-image.zoomed {
+  max-width: 100%;
+  max-height: none;
+  cursor: zoom-out;
 }
 
 /* The |/-\ "thinking" spinner shown under the prompt before output appears. */

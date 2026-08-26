@@ -7,6 +7,13 @@ import { WorktreeRail } from './worktrees';
 import { IDLE_STATUS, type RunCommand, type RunStatus } from './runConfig';
 import { FileTree } from './fileTree';
 import { FileView } from './fileView';
+import {
+  MAX_IMAGES,
+  dragHasImages,
+  imageFilesFrom,
+  prepareImage,
+  type PastedImage,
+} from './images';
 import type { Worktree } from './bridge';
 import {
   FALLBACK_MODELS,
@@ -43,7 +50,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </aside>
       <section class="conversation">
         <div class="transcripts" id="conversation"></div>
-        <div class="composer">
+        <div class="composer" id="composer">
+          <div class="attachments" id="attachments" hidden></div>
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
             <button id="thinking" class="btn toggle" aria-pressed="false">✳ Thinking</button>
@@ -78,6 +86,8 @@ const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
+const composer = document.getElementById('composer') as HTMLElement;
+const attachmentTray = document.getElementById('attachments') as HTMLElement;
 const thinkingBtn = document.getElementById('thinking') as HTMLButtonElement;
 const modelPicker = document.getElementById('model') as HTMLSelectElement;
 const effortPicker = document.getElementById('effort') as HTMLSelectElement;
@@ -91,6 +101,72 @@ const railRefreshBtn = document.getElementById('rail-refresh') as HTMLButtonElem
 const viewFileBtn = document.getElementById('view-file') as HTMLButtonElement;
 
 let activeWorktree: Worktree | null = null;
+
+/**
+ * The composer is per-worktree, like the transcript above it: each worktree
+ * holds its own half-written prompt, so switching mid-sentence parks what you
+ * were saying here and brings back what you'd been saying over there.
+ *
+ * The live copy is this map, not the store: repainting the box on a switch has
+ * to be synchronous, or the first keystroke after a click lands in whichever
+ * worktree's draft the read happened to still be resolving. The store is the
+ * copy that survives a restart, written behind a short debounce so a long
+ * prompt is one write when the typing stops rather than one per key.
+ */
+const drafts = new Map<string, string>();
+const DRAFT_SAVE_MS = 400;
+/** A debounced save not yet landed, and the worktree whose text it carries. */
+let pendingDraft: { cwd: string; timer: number } | null = null;
+
+/** Push a worktree's draft through to the store now. */
+function saveDraft(cwd: string) {
+  if (pendingDraft?.cwd === cwd) {
+    clearTimeout(pendingDraft.timer);
+    pendingDraft = null;
+  }
+  void window.cockpit?.store.setDraft(cwd, drafts.get(cwd) ?? '');
+}
+
+/** The box changed — hold it against the active worktree and save it shortly. */
+function noteDraft() {
+  const cwd = activeWorktree?.path;
+  if (!cwd) return;
+  drafts.set(cwd, promptInput.value);
+  // A save still pending for another worktree is that worktree's last few
+  // keystrokes — land it rather than dropping it with its timer.
+  if (pendingDraft && pendingDraft.cwd !== cwd) saveDraft(pendingDraft.cwd);
+  if (pendingDraft) clearTimeout(pendingDraft.timer);
+  pendingDraft = { cwd, timer: window.setTimeout(() => saveDraft(cwd), DRAFT_SAVE_MS) };
+}
+
+/** Park the box's contents on the worktree they were typed at, before the
+ *  composer is pointed somewhere else. */
+function stashDraft() {
+  const cwd = activeWorktree?.path;
+  if (!cwd) return;
+  // An empty box at a worktree nothing has been typed at yet is not news — and
+  // its stored draft may still be in flight, which this would clobber with ''.
+  if (!drafts.has(cwd) && !promptInput.value) return;
+  drafts.set(cwd, promptInput.value);
+  // Don't leave the last keystrokes riding a timer the switch outlives.
+  if (pendingDraft?.cwd === cwd) saveDraft(cwd);
+}
+
+/**
+ * Bring back the prompt a worktree was left mid-typing. Only the first time
+ * it's opened this run — after that the map is the live copy and the store is
+ * merely following it.
+ */
+async function restoreDraft(wt: Worktree) {
+  if (drafts.has(wt.path)) return;
+  const stored = (await window.cockpit?.store.draft(wt.path)) ?? '';
+  // Anything typed while that was in flight is newer than what came back.
+  if (drafts.has(wt.path)) return;
+  drafts.set(wt.path, stored);
+  // The rail may have been clicked again — only the selected worktree's draft
+  // belongs in the box.
+  if (activeWorktree?.path === wt.path) promptInput.value = stored;
+}
 
 /**
  * The open file's tab appears only once there is one, and wears the file's own
@@ -206,6 +282,9 @@ window.cockpit?.run.onEvent(({ cwd, status }) => {
 const rail = new WorktreeRail(
   railWorktrees,
   (wt) => {
+    // Park the half-written prompt on the worktree being left, before the box
+    // starts belonging to the new one.
+    stashDraft();
     activeWorktree = wt;
     activeWtLabel.textContent = wt.name;
     activeWtLabel.classList.add('set');
@@ -213,6 +292,10 @@ const rail = new WorktreeRail(
     // the stored one the first time it's opened this run.
     cockpit.showPane(wt.path);
     cockpit.restorePane(wt.path);
+    // The composer follows the transcript: this worktree's own draft, from the
+    // map if it's been open this run and from the store the first time.
+    promptInput.value = drafts.get(wt.path) ?? '';
+    void restoreDraft(wt);
     void setRunWorktree(wt);
     void setThinkingWorktree(wt);
     void setAgentWorktree(wt);
@@ -229,6 +312,9 @@ const rail = new WorktreeRail(
       activeWorktree = null;
       activeWtLabel.textContent = 'no worktree';
       activeWtLabel.classList.remove('set');
+      // Nothing to type at — and the draft belonged to a directory that no
+      // longer exists, so it goes with it rather than into the next worktree.
+      promptInput.value = '';
       cockpit.resetDiff();
       // The directory is gone; its run went with it in removeWorktree.
       void setRunWorktree(null);
@@ -237,6 +323,8 @@ const rail = new WorktreeRail(
       updateSendStop();
     }
     cockpit.dropPane(path);
+    drafts.delete(path);
+    saveDraft(path);
     fileTree.dropWorktree(path);
     fileView.dropWorktree(path);
   },
@@ -595,6 +683,112 @@ effortPicker.addEventListener('change', () => {
 paintPickers();
 void refreshModels();
 
+/**
+ * Screenshots waiting to go out with the next prompt.
+ *
+ * Composer state, on the same terms as the text in the box: shared by every
+ * worktree, kept across a switch, and let go the moment it's sent. It is not
+ * per-worktree like the switchers are, because it isn't a setting — it's half of
+ * a prompt somebody is in the middle of writing.
+ */
+let attachments: PastedImage[] = [];
+
+function paintAttachments() {
+  attachmentTray.replaceChildren();
+  attachmentTray.hidden = attachments.length === 0;
+
+  for (const image of attachments) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment';
+    chip.title = `${image.width}×${image.height} · ${Math.round(image.bytes / 1024)} KB`;
+
+    const thumb = document.createElement('img');
+    thumb.src = image.dataUrl;
+    thumb.alt = '';
+    chip.append(thumb);
+
+    const drop = document.createElement('button');
+    drop.className = 'attachment-drop';
+    drop.textContent = '×';
+    drop.title = 'Remove';
+    drop.addEventListener('click', () => {
+      attachments = attachments.filter((held) => held.id !== image.id);
+      paintAttachments();
+      promptInput.focus();
+    });
+    chip.append(drop);
+
+    attachmentTray.append(chip);
+  }
+}
+
+/**
+ * Take some images onto the composer, one at a time so each thumbnail appears as
+ * soon as it's ready rather than the whole batch at the end. A file that can't be
+ * read says so on the statusline and the rest still land — one bad paste is not a
+ * reason to lose the four screenshots beside it.
+ */
+async function attach(files: File[]) {
+  const room = MAX_IMAGES - attachments.length;
+  if (room <= 0) {
+    setStatusLine(`A prompt carries up to ${MAX_IMAGES} images — send these first.`);
+    return;
+  }
+  if (files.length > room) {
+    setStatusLine(`Only ${room} more image${room === 1 ? '' : 's'} fit on this prompt.`);
+  }
+  for (const file of files.slice(0, room)) {
+    try {
+      attachments.push(await prepareImage(file));
+      paintAttachments();
+    } catch (error) {
+      setStatusLine(`That image didn't come through — ${(error as Error).message}.`);
+    }
+  }
+}
+
+/**
+ * Whether a paste belongs to the composer. The prompt box always owns one; so
+ * does a paste with nothing focused, which is what ⌘⇧4 then ⌘V looks like when
+ * the window has just come forward. A paste aimed at any other editable — the
+ * file editor's Monaco textarea, the worktree rail's name field — is that
+ * surface's own, image or not.
+ */
+function composerOwnsPaste(target: EventTarget | null): boolean {
+  if (target === promptInput) return true;
+  if (!(target instanceof HTMLElement)) return true;
+  return !target.closest('input, textarea, [contenteditable="true"], .workspace');
+}
+
+document.addEventListener('paste', (event) => {
+  if (!composerOwnsPaste(event.target)) return;
+  const files = imageFilesFrom(event.clipboardData);
+  if (!files.length) return;
+  // Only images are claimed — a text paste is left to land wherever it was going.
+  event.preventDefault();
+  void attach(files);
+});
+
+// A file dropped on the window would otherwise navigate to it, replacing the app
+// with the image. Refuse everywhere, and take it in over the composer.
+document.addEventListener('dragover', (event) => event.preventDefault());
+document.addEventListener('drop', (event) => event.preventDefault());
+
+composer.addEventListener('dragover', (event) => {
+  if (dragHasImages(event.dataTransfer)) composer.classList.add('dropping');
+});
+composer.addEventListener('dragleave', (event) => {
+  // Crossing onto a child fires dragleave on the parent; only a real exit counts.
+  if (!composer.contains(event.relatedTarget as Node | null)) {
+    composer.classList.remove('dropping');
+  }
+});
+composer.addEventListener('drop', (event) => {
+  composer.classList.remove('dropping');
+  const files = imageFilesFrom(event.dataTransfer);
+  if (files.length) void attach(files);
+});
+
 stopBtn.addEventListener('click', () => {
   if (activeWorktree && runningCwds.has(activeWorktree.path)) {
     window.cockpit?.agent.interrupt(activeWorktree.path);
@@ -603,7 +797,9 @@ stopBtn.addEventListener('click', () => {
 
 async function sendPrompt() {
   const prompt = promptInput.value.trim();
-  if (!prompt) return;
+  // A screenshot with nothing typed is a prompt in its own right — "look at
+  // this" — so either half is enough to send on.
+  if (!prompt && !attachments.length) return;
 
   // Turns run against a worktree through the main process — in the browser there
   // is no bridge and nothing to run against.
@@ -620,13 +816,22 @@ async function sendPrompt() {
   // unspooling into its own transcript whether or not it's on screen.
   const cwd = activeWorktree.path;
   if (runningCwds.has(cwd)) return; // that worktree's turn is still going
+  // Sent, so there's no draft left here — clear it in the store too, or coming
+  // back to this worktree would hand back a prompt already in the transcript.
   promptInput.value = '';
+  drafts.set(cwd, '');
+  saveDraft(cwd);
+  // Handed to this turn, so a paste during it starts the next prompt's tray
+  // rather than joining one already in flight.
+  const images = attachments;
+  attachments = [];
+  paintAttachments();
   runningCwds.add(cwd);
   rail.setRunning(cwd, true);
   updateSendStop();
   syncStatsPoll();
   try {
-    await runStream(cockpit, electronSource({ prompt, cwd }), { key: cwd, reset: false });
+    await runStream(cockpit, electronSource({ prompt, cwd, images }), { key: cwd, reset: false });
   } finally {
     runningCwds.delete(cwd);
     rail.setRunning(cwd, false);
@@ -644,6 +849,12 @@ async function sendPrompt() {
 }
 
 sendBtn.addEventListener('click', sendPrompt);
+promptInput.addEventListener('input', noteDraft);
+// Clicking away is the moment a draft is most likely to be abandoned for a
+// while — land it now rather than trusting the debounce to outlive the window.
+promptInput.addEventListener('blur', () => {
+  if (pendingDraft) saveDraft(pendingDraft.cwd);
+});
 promptInput.addEventListener('keydown', (e) => {
   // Enter sends; Shift+Enter drops a newline into the box.
   if (e.key === 'Enter' && !e.shiftKey) {

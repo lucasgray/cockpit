@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, shell } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import path from 'node:path';
-import type { AgentEvent } from '../src/agent/protocol';
+import type { AgentEvent, OutboundImage } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
 import {
   answerAgent,
@@ -14,6 +14,7 @@ import {
   runAgent,
 } from './agentRunner';
 import { dirStamps, listDir, readFileContents, writeFileContents } from './files';
+import { dropImages, openImageStore, readImage, saveImages } from './images';
 import {
   closeRun,
   detectRunCommand,
@@ -33,6 +34,25 @@ const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT =
   process.env.COCKPIT_PROJECT_ROOT || '/Users/lucas-comp/projects/agent-cockpit';
+
+/**
+ * How a transcript names a screenshot it is holding.
+ *
+ * Pasted images are files beside the database rather than base64 in the event
+ * stream, so the renderer needs some way to put one in an `<img src>`. A scheme
+ * of the cockpit's own does it without opening `file://` to the page: the handler
+ * below resolves every request inside the image store and refuses the rest.
+ *
+ * Registered at module scope because privileged schemes have to be declared
+ * before the app is ready — the handler itself is installed in whenReady.
+ */
+const IMAGE_SCHEME = 'cockpit-image';
+protocol.registerSchemesAsPrivileged([
+  // Standard so the URL parses host-then-path, secure so a page served over http
+  // in dev isn't refused it as mixed content. Nothing more: these images are only
+  // ever loaded by an <img>, never fetched.
+  { scheme: IMAGE_SCHEME, privileges: { standard: true, secure: true } },
+]);
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 4 * 1024 * 1024 });
@@ -289,6 +309,7 @@ async function removeWorktree(cwd: string): Promise<WorktreeRemoveResult> {
   getStore().clearTranscript(cwd);
   // The remembered PR pointed at this branch; the branch is gone, so forget it.
   getStore().setPr(cwd, null);
+  void dropImages(cwd);
   // The port goes back in the pool — otherwise a long-lived cockpit would walk
   // its assignments upward forever as worktrees come and go.
   getStore().releasePort(cwd);
@@ -345,6 +366,18 @@ function createWindow() {
 app.whenReady().then(() => {
   // The app's own state lives beside the app, never in the repo being worked on.
   openStore(app.getPath('userData'));
+  openImageStore(app.getPath('userData'));
+
+  // `cockpit-image://image/<worktree>/<name>` — a fixed host, and a path that is
+  // the file's own name inside the store. Nothing outside it can be reached.
+  protocol.handle(IMAGE_SCHEME, async (request) => {
+    const { pathname } = new URL(request.url);
+    const found = await readImage(decodeURIComponent(pathname).replace(/^\/+/, ''));
+    if (!found) return new Response(null, { status: 404 });
+    return new Response(new Uint8Array(found.bytes), {
+      headers: { 'content-type': found.mediaType, 'cache-control': 'no-store' },
+    });
+  });
 
   ipcMain.handle('worktrees:list', () => listWorktrees());
   ipcMain.handle('worktrees:create', (_event, branch: string) => createWorktree(branch));
@@ -369,12 +402,23 @@ app.whenReady().then(() => {
   });
   ipcMain.handle(
     'agent:run',
-    (event, req: { prompt: string; cwd: string; runId: string }) => {
+    async (
+      event,
+      req: { prompt: string; cwd: string; runId: string; images?: OutboundImage[] },
+    ) => {
       const store = getStore();
+      // Pasted screenshots go to disk before the turn starts, so the stored
+      // transcript can name them. The bytes Claude reads are still the ones on
+      // the request — these are the copy the conversation comes back with.
+      const images = await saveImages(req.cwd, req.images ?? []);
       // The renderer echoes the prompt for immediate feedback, but the stored
       // transcript is written here — so record it too, or a restored
       // conversation would come back as Claude talking to nobody.
-      store.appendEvent(req.cwd, { type: 'user', text: req.prompt });
+      store.appendEvent(req.cwd, {
+        type: 'user',
+        text: req.prompt,
+        ...(images.length ? { images } : {}),
+      });
       // The three switchers are read here rather than sent with the prompt: the
       // store is where they live, and this is the moment they have to be true.
       // An unpinned model falls back to the cockpit's settings, then to the CLI.
@@ -419,7 +463,12 @@ app.whenReady().then(() => {
   ipcMain.handle('run:status', (_event, cwd: string) => runStatus(cwd));
 
   ipcMain.handle('store:transcript', (_event, cwd: string) => getStore().transcript(cwd));
-  ipcMain.handle('store:clearTranscript', (_event, cwd: string) => getStore().clearTranscript(cwd));
+  // Clearing a transcript clears what it was holding: the screenshots in it are
+  // only reachable through the events being deleted.
+  ipcMain.handle('store:clearTranscript', (_event, cwd: string) => {
+    getStore().clearTranscript(cwd);
+    return dropImages(cwd);
+  });
   ipcMain.handle('store:selectedWorktree', () => getStore().selectedWorktree());
   ipcMain.handle('store:setSelectedWorktree', (_event, cwd: string | null) =>
     getStore().setSelectedWorktree(cwd),
@@ -427,6 +476,10 @@ app.whenReady().then(() => {
   ipcMain.handle('store:openFile', (_event, cwd: string) => getStore().openFile(cwd));
   ipcMain.handle('store:setOpenFile', (_event, cwd: string, file: string | null) =>
     getStore().setOpenFile(cwd, file),
+  );
+  ipcMain.handle('store:draft', (_event, cwd: string) => getStore().draft(cwd));
+  ipcMain.handle('store:setDraft', (_event, cwd: string, text: string) =>
+    getStore().setDraft(cwd, text),
   );
   ipcMain.handle('store:thinking', (_event, cwd: string) => getStore().thinking(cwd));
   ipcMain.handle('store:setThinking', (_event, cwd: string, on: boolean) =>

@@ -1,6 +1,14 @@
 import { monaco } from './monaco-env';
 import { renderMarkdown } from './markdown';
-import type { AgentEvent, EditOp, PlanItem, QuestionSpec, TodoItem } from './agent/protocol';
+import { storedImageUrl } from './images';
+import type {
+  AgentEvent,
+  EditOp,
+  PlanItem,
+  QuestionSpec,
+  TodoItem,
+  TranscriptImage,
+} from './agent/protocol';
 
 const sleep = (ms: number) =>
   document.hidden ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
@@ -319,7 +327,7 @@ export class Cockpit {
     if (!replaying && event.type !== 'user' && event.type !== 'thinking') this.stopSpinner();
     switch (event.type) {
       case 'user':
-        this.addUser(event.text);
+        this.addUser(event.text, event.images ?? []);
         if (!replaying) this.startSpinner();
         break;
       case 'thinking':
@@ -396,9 +404,39 @@ export class Cockpit {
     return el;
   }
 
-  private addUser(text: string) {
+  /**
+   * The operator's turn. Screenshots sit above the words they were pasted with —
+   * the order Claude reads them in — and stay thumbnails until clicked, so a
+   * turn that carried four of them doesn't push the conversation off the screen.
+   */
+  private addUser(text: string, images: TranscriptImage[] = []) {
     this.closeBubble();
-    this.addMessage('user').textContent = text;
+    const wrap = this.addMessage('user');
+
+    if (images.length) {
+      const strip = document.createElement('div');
+      strip.className = 'user-images';
+      for (const image of images) {
+        const thumb = document.createElement('img');
+        thumb.className = 'user-image';
+        thumb.src = image.kind === 'inline' ? image.dataUrl : storedImageUrl(image.file);
+        thumb.alt = 'pasted image';
+        thumb.title = 'Click to enlarge';
+        thumb.addEventListener('click', () => thumb.classList.toggle('zoomed'));
+        strip.append(thumb);
+      }
+      wrap.append(strip);
+    }
+
+    // A screenshot on its own is a whole prompt — don't leave an empty line
+    // under it where the text would have been.
+    if (text) {
+      const body = document.createElement('div');
+      body.className = 'user-text';
+      body.textContent = text;
+      wrap.append(body);
+    }
+    this.scrollDown();
   }
 
   private startTool(id: string, name: string, summary: string, detail?: string) {

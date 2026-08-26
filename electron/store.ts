@@ -144,12 +144,16 @@ export class Store {
   }
 
   /**
-   * The file open in each worktree's editor pane. One row rather than a table:
-   * it's a handful of paths, rewritten on every click, and worth exactly as much
-   * as the selected-worktree pointer beside it.
+   * The per-worktree odds and ends the composer and workspace remember: each is
+   * one meta row holding a path→value map, rather than a table apiece. They're a
+   * handful of short strings, rewritten on every click, and worth exactly as
+   * much as the selected-worktree pointer beside them.
+   *
+   * Empty means absent throughout — a worktree with no entry has never been
+   * given one, which for a pin is not the same as being pinned to a value.
    */
-  private openFiles(): Record<string, string> {
-    const raw = this.readMeta('openFiles');
+  private record(key: 'openFiles' | 'drafts' | 'agentModel' | 'agentEffort'): Record<string, string> {
+    const raw = this.readMeta(key);
     if (!raw) return {};
     try {
       const parsed = JSON.parse(raw) as unknown;
@@ -159,15 +163,38 @@ export class Store {
     }
   }
 
+  private setRecordValue(
+    key: 'openFiles' | 'drafts' | 'agentModel' | 'agentEffort',
+    cwd: string,
+    value: string,
+  ) {
+    const values = this.record(key);
+    if (value) values[cwd] = value;
+    else delete values[cwd];
+    this.writeMeta(key, JSON.stringify(values));
+  }
+
+  /** The file open in each worktree's editor pane. */
   openFile(cwd: string): string | null {
-    return this.openFiles()[cwd] ?? null;
+    return this.record('openFiles')[cwd] ?? null;
   }
 
   setOpenFile(cwd: string, file: string | null) {
-    const files = this.openFiles();
-    if (file === null) delete files[cwd];
-    else files[cwd] = file;
-    this.writeMeta('openFiles', JSON.stringify(files));
+    this.setRecordValue('openFiles', cwd, file ?? '');
+  }
+
+  /**
+   * The half-written prompt sitting in each worktree's composer. Keyed to the
+   * worktree like the transcript above it: walk away from a sentence in one
+   * worktree, and it's still there when you come back, rather than having been
+   * pushed aside by whatever was typed somewhere else meanwhile.
+   */
+  draft(cwd: string): string {
+    return this.record('drafts')[cwd] ?? '';
+  }
+
+  setDraft(cwd: string, text: string) {
+    this.setRecordValue('drafts', cwd, text);
   }
 
   /**
@@ -208,39 +235,21 @@ export class Store {
    * back to the cockpit's own settings, and past that to whatever the CLI does
    * on its own.
    */
-  private pins(key: 'agentModel' | 'agentEffort'): Record<string, string> {
-    const raw = this.readMeta(key);
-    if (!raw) return {};
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
-    } catch {
-      return {};
-    }
-  }
-
-  private setPin(key: 'agentModel' | 'agentEffort', cwd: string, value: string) {
-    const pins = this.pins(key);
-    if (value) pins[cwd] = value;
-    else delete pins[cwd];
-    this.writeMeta(key, JSON.stringify(pins));
-  }
-
   model(cwd: string): string {
-    return this.pins('agentModel')[cwd] ?? '';
+    return this.record('agentModel')[cwd] ?? '';
   }
 
   setModel(cwd: string, model: string) {
-    this.setPin('agentModel', cwd, model);
+    this.setRecordValue('agentModel', cwd, model);
   }
 
   effort(cwd: string): EffortChoice {
-    const stored = this.pins('agentEffort')[cwd];
+    const stored = this.record('agentEffort')[cwd];
     return EFFORT_LEVELS.includes(stored as EffortLevel) ? (stored as EffortLevel) : '';
   }
 
   setEffort(cwd: string, effort: EffortChoice) {
-    this.setPin('agentEffort', cwd, effort);
+    this.setRecordValue('agentEffort', cwd, effort);
   }
 
   /**
