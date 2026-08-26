@@ -14,8 +14,141 @@ export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'dontAsk';
 
 export const PERMISSION_MODES: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'dontAsk'];
 
+/**
+ * How hard the model works on a turn — the composer's effort switcher. Not every
+ * model takes one (Haiku doesn't), and the ones that do don't all reach `max`,
+ * so which levels are offered comes from the model, not from this list.
+ */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** '' means "don't send one" — the CLI's own default, whatever that is here. */
+export type EffortChoice = EffortLevel | '';
+
+/** One row in the composer's model switcher. */
+export type ModelChoice = {
+  /** Model id to hand the SDK. '' is the default entry — send no model at all. */
+  value: string;
+  label: string;
+  /**
+   * The wire id this row's `value` resolves to, when the two differ — the live
+   * catalogue tends to speak in aliases (`opus`) where a pin written from
+   * `FALLBACK_MODELS` holds the full id (`claude-opus-5`). Carrying it is what
+   * lets the switcher recognise such a pin as this row rather than as a stranger.
+   */
+  resolvedModel?: string;
+  /**
+   * The CLI's own one-liner — "Opus 5 with 1M context · Best for everyday,
+   * complex tasks". This is the only thing that says *which* Opus a row is: the
+   * display names are bare ("Opus (1M context)", "Default (recommended)"), so
+   * without it two rows pointing at different generations look identical.
+   */
+  description?: string;
+  /** Effort levels this model accepts. Empty means it takes no effort at all. */
+  effortLevels: EffortLevel[];
+};
+
+/** Effort on the 4.6 generation, which predates `xhigh` (added with Opus 4.7). */
+const EFFORT_NO_XHIGH: EffortLevel[] = ['low', 'medium', 'high', 'max'];
+
+/**
+ * Models this machine can reach that `supportedModels()` doesn't advertise.
+ *
+ * The CLI's catalogue lists only the current generation — Opus 5, Fable 5,
+ * Sonnet 5, Haiku 4.5. The generation before it is still perfectly reachable;
+ * it just isn't offered, so a switcher built from the catalogue alone can't name
+ * a single one of them. These rows are merged in beside the live ones.
+ *
+ * Every entry below was verified by running an actual turn against it, and every
+ * `value` carries the `[1m]` suffix for the same reason the catalogue's own
+ * `opus[1m]` row does: without it Claude Code caps the session at 200K.
+ *
+ * This list is hand-maintained, which is the cost of the CLI not exposing one.
+ * Prefer whatever the catalogue offers — an entry here that the CLI later starts
+ * advertising is dropped as a duplicate rather than shown twice.
+ */
+export const UNLISTED_MODELS: ModelChoice[] = [
+  {
+    value: 'claude-opus-4-8[1m]',
+    label: 'Opus 4.8',
+    resolvedModel: 'claude-opus-4-8',
+    description: 'Opus 4.8 with 1M context · The generation before Opus 5',
+    effortLevels: EFFORT_LEVELS,
+  },
+  {
+    value: 'claude-opus-4-7[1m]',
+    label: 'Opus 4.7',
+    resolvedModel: 'claude-opus-4-7',
+    description: 'Opus 4.7 with 1M context',
+    effortLevels: EFFORT_LEVELS,
+  },
+  {
+    value: 'claude-opus-4-6[1m]',
+    label: 'Opus 4.6',
+    resolvedModel: 'claude-opus-4-6',
+    description: 'Opus 4.6 with 1M context · No xhigh effort on this generation',
+    effortLevels: EFFORT_NO_XHIGH,
+  },
+  {
+    value: 'claude-sonnet-4-6[1m]',
+    label: 'Sonnet 4.6',
+    resolvedModel: 'claude-sonnet-4-6',
+    description: 'Sonnet 4.6 with 1M context · No xhigh effort on this generation',
+    effortLevels: EFFORT_NO_XHIGH,
+  },
+];
+
+/**
+ * What the model switcher shows before any session has opened.
+ *
+ * The real list comes from the installed Claude Code (`supportedModels()`), which
+ * is the only thing that actually knows what this machine can reach — but that
+ * needs a live query, and the cockpit can be sitting at a worktree it has never
+ * prompted. So the switcher opens on this and swaps itself for the live catalogue
+ * the moment a session exists. Keep it short: it is a placeholder, not a policy.
+ *
+ * The values here are the CLI's *aliases*, not wire ids, because that is what the
+ * live catalogue returns — matching it means the swap is invisible rather than a
+ * set of rows that all quietly reshuffle the moment a session opens.
+ */
+export const FALLBACK_MODELS: ModelChoice[] = [
+  {
+    value: 'opus[1m]',
+    label: 'Opus (1M context)',
+    resolvedModel: 'claude-opus-5[1m]',
+    description: 'Opus 5 with 1M context · Best for everyday, complex tasks',
+    effortLevels: EFFORT_LEVELS,
+  },
+  {
+    value: 'claude-fable-5[1m]',
+    label: 'Fable',
+    resolvedModel: 'claude-fable-5',
+    description: 'Fable 5 · Most capable for your hardest and longest-running tasks',
+    effortLevels: EFFORT_LEVELS,
+  },
+  {
+    value: 'sonnet',
+    label: 'Sonnet',
+    resolvedModel: 'claude-sonnet-5',
+    description: 'Sonnet 5 · Efficient for routine tasks',
+    effortLevels: EFFORT_LEVELS,
+  },
+  {
+    value: 'haiku',
+    label: 'Haiku',
+    resolvedModel: 'claude-haiku-4-5-20251001',
+    description: 'Haiku 4.5 · Fastest for quick answers',
+    effortLevels: [],
+  },
+];
+
 export type CockpitSettings = {
-  /** Model id, or '' to take the CLI's default. */
+  /**
+   * Model id every worktree starts on, or '' to take the CLI's default. The
+   * composer's switcher pins a model *per worktree* and wins over this — this is
+   * the floor under a worktree that has never been pinned.
+   */
   model: string;
   permissionMode: PermissionMode;
   maxTurns: number;

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { AgentRunRequest, CockpitBridge, WorktreeHookResult } from '../src/bridge';
-import type { CockpitSettings } from '../src/settings';
+import type { CockpitSettings, EffortChoice } from '../src/settings';
 import type { RunEvent } from '../src/runConfig';
 
 const bridge: CockpitBridge = {
@@ -31,6 +31,7 @@ const bridge: CockpitBridge = {
     interrupt: (cwd: string) => ipcRenderer.invoke('agent:interrupt', cwd),
     answer: (cwd: string, id: string, selection: string) =>
       ipcRenderer.invoke('agent:answer', { cwd, id, selection }),
+    models: () => ipcRenderer.invoke('agent:models'),
   },
   files: {
     list: (cwd: string, dir: string) => ipcRenderer.invoke('files:list', cwd, dir),
@@ -63,6 +64,11 @@ const bridge: CockpitBridge = {
       ipcRenderer.invoke('store:setOpenFile', cwd, path),
     thinking: (cwd: string) => ipcRenderer.invoke('store:thinking', cwd),
     setThinking: (cwd: string, on: boolean) => ipcRenderer.invoke('store:setThinking', cwd, on),
+    model: (cwd: string) => ipcRenderer.invoke('store:model', cwd),
+    setModel: (cwd: string, model: string) => ipcRenderer.invoke('store:setModel', cwd, model),
+    effort: (cwd: string) => ipcRenderer.invoke('store:effort', cwd),
+    setEffort: (cwd: string, effort: EffortChoice) =>
+      ipcRenderer.invoke('store:setEffort', cwd, effort),
     railView: () => ipcRenderer.invoke('store:railView'),
     setRailView: (view: string) => ipcRenderer.invoke('store:setRailView', view),
     settings: () => ipcRenderer.invoke('store:settings'),
