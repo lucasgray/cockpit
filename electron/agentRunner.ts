@@ -485,6 +485,10 @@ class Session {
             name: block.name,
             summary: summarizeTool(block.name, input, this.cwd),
             detail: toolDetail(block.name, input),
+            // Non-null when this tool ran inside a subagent; the SDK forwards a
+            // subagent's tool calls by default, which is the heartbeat the
+            // cockpit counts under the subagent's own row.
+            parent: msg.parent_tool_use_id ?? undefined,
           });
         }
         continue;

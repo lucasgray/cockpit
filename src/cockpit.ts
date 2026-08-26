@@ -49,6 +49,9 @@ type Pane = {
   /** This pane's own typewriter frame, so panes can reveal concurrently. */
   revealFrame: number;
   tools: Map<string, HTMLElement>;
+  /** Live subagent rows, keyed by the Task tool_use id, so their inner tool
+   *  calls can be counted onto them as a working heartbeat. */
+  subagents: Map<string, { steps: number; label: HTMLElement }>;
   todos: HTMLElement | null;
   /** The "thinking" spinner under the prompt (+ its interval), while it thinks. */
   spinner: HTMLElement | null;
@@ -59,7 +62,6 @@ type Pane = {
 
 export class Cockpit {
   private conversations: HTMLElement;
-  private tabs: HTMLElement;
   private status: HTMLElement;
   private diffEditor: monaco.editor.IStandaloneDiffEditor;
   private models: monaco.editor.ITextModel[] = [];
@@ -93,7 +95,6 @@ export class Cockpit {
 
   constructor() {
     this.conversations = document.getElementById('conversation')!;
-    this.tabs = document.getElementById('tabs')!;
     this.status = document.getElementById('status')!;
     const diffContainer = document.getElementById('diff')!;
 
@@ -131,6 +132,7 @@ export class Cockpit {
         bubbleShown: 0,
         revealFrame: 0,
         tools: new Map(),
+        subagents: new Map(),
         todos: null,
         spinner: null,
         spinnerTimer: 0,
@@ -188,6 +190,7 @@ export class Cockpit {
     pane.bubbleText = '';
     pane.bubbleShown = 0;
     pane.tools.clear();
+    pane.subagents.clear();
     pane.todos = null;
   }
 
@@ -279,7 +282,6 @@ export class Cockpit {
     this.editGen++;
     this.turnBudget = TURN_BUDGET_MS;
     this.fastForward = false;
-    this.tabs.innerHTML = '';
     this.status.textContent = '';
     this.diffEditor.setModel(null);
     this.models.forEach((m) => m.dispose());
@@ -347,7 +349,7 @@ export class Cockpit {
         this.renderPlan(event.title, event.items);
         break;
       case 'tool_start':
-        this.startTool(event.id, event.name, event.summary, event.detail);
+        this.startTool(event.id, event.name, event.summary, event.detail, event.parent);
         break;
       case 'tool_end':
         this.endTool(event.id, event.ok, event.detail);
@@ -439,16 +441,31 @@ export class Cockpit {
     this.scrollDown();
   }
 
-  private startTool(id: string, name: string, summary: string, detail?: string) {
+  private startTool(id: string, name: string, summary: string, detail?: string, parent?: string) {
+    // A tool that ran inside a subagent isn't a row of its own — it's one tick
+    // of that subagent's work. Count it onto the subagent's row instead.
+    if (parent) {
+      const sub = this.pane.subagents.get(parent);
+      if (sub) {
+        sub.steps++;
+        this.paintSubagent(parent);
+        return;
+      }
+      // Parent unknown (its row scrolled out of a replay, say) — fall through
+      // and draw it as an ordinary row rather than dropping it.
+    }
+
     this.closeBubble();
+    const isSubagent = name === 'Task' || name === 'Agent';
     const row = this.addMessage('tool running');
+    if (isSubagent) row.classList.add('subagent');
 
     const head = document.createElement('div');
     head.className = 'tool-head';
     head.innerHTML =
       '<span class="tool-glyph"></span><span class="tool-name"></span>' +
-      '<span class="tool-summary"></span><span class="tool-caret"></span>';
-    head.querySelector('.tool-name')!.textContent = name;
+      '<span class="tool-summary"></span><span class="tool-steps"></span><span class="tool-caret"></span>';
+    head.querySelector('.tool-name')!.textContent = isSubagent ? 'Subagent' : name;
     head.querySelector('.tool-summary')!.textContent = summary;
 
     const body = document.createElement('div');
@@ -467,6 +484,23 @@ export class Cockpit {
     });
     this.syncToolBody(row);
     this.pane.tools.set(id, row);
+    if (isSubagent) {
+      this.pane.subagents.set(id, { steps: 0, label: head.querySelector('.tool-steps')! });
+      this.paintSubagent(id);
+    }
+  }
+
+  /** The subagent row's live status — "working" while it churns, then its final
+   *  step count once it's done. */
+  private paintSubagent(id: string, done = false) {
+    const sub = this.pane.subagents.get(id);
+    if (!sub) return;
+    const steps = sub.steps === 1 ? '1 step' : `${sub.steps} steps`;
+    sub.label.textContent = done
+      ? `· done · ${steps}`
+      : sub.steps
+        ? `· working… · ${steps}`
+        : '· working…';
   }
 
   private endTool(id: string, ok: boolean, detail?: string) {
@@ -475,6 +509,11 @@ export class Cockpit {
     this.pane.tools.delete(id);
     row.classList.remove('running');
     row.classList.add(ok ? 'ok' : 'failed');
+    // A subagent row settles to "done" with the count it reached.
+    if (this.pane.subagents.has(id)) {
+      this.paintSubagent(id, true);
+      this.pane.subagents.delete(id);
+    }
     if (detail) {
       const out = document.createElement('pre');
       out.className = 'tool-out';
@@ -742,12 +781,6 @@ export class Cockpit {
 
   private startEdit(file: string, language: string, original: string) {
     this.appliedWhole = false;
-    this.tabs.innerHTML = '';
-    const tab = document.createElement('div');
-    tab.className = 'tab active';
-    tab.textContent = file;
-    this.tabs.append(tab);
-
     this.models.forEach((m) => m.dispose());
     const originalModel = monaco.editor.createModel(original, language);
     const modifiedModel = monaco.editor.createModel(original, language);

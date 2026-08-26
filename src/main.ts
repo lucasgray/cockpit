@@ -7,6 +7,7 @@ import { WorktreeRail } from './worktrees';
 import { IDLE_STATUS, type RunCommand, type RunStatus } from './runConfig';
 import { FileTree } from './fileTree';
 import { FileView } from './fileView';
+import { FileTabs } from './fileTabs';
 import {
   MAX_IMAGES,
   dragHasImages,
@@ -67,7 +68,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div class="ws-head">
           <div class="tabs" id="tabs"></div>
           <div class="ws-toggle">
-            <button id="view-file" class="ws-tab" hidden>File</button>
             <button id="view-live" class="ws-tab active">Live</button>
             <button id="view-changes" class="ws-tab">Changes</button>
           </div>
@@ -98,7 +98,7 @@ const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 const railWorktrees = document.getElementById('rail-worktrees') as HTMLElement;
 const railFiles = document.getElementById('rail-files') as HTMLElement;
 const railRefreshBtn = document.getElementById('rail-refresh') as HTMLButtonElement;
-const viewFileBtn = document.getElementById('view-file') as HTMLButtonElement;
+const tabStrip = document.getElementById('tabs') as HTMLElement;
 
 let activeWorktree: Worktree | null = null;
 
@@ -169,17 +169,35 @@ async function restoreDraft(wt: Worktree) {
 }
 
 /**
- * The open file's tab appears only once there is one, and wears the file's own
- * name — the pane below it carries the full path.
+ * Each open file wears its own tab across the top of the workspace, in the order
+ * it was opened, and the tabs stay put while Live or Changes is showing — the set
+ * of files you have open is yours, not the current view's. The strip is chrome
+ * only; every gesture calls back into the FileView that owns the buffers.
  */
-const fileView = new FileView(document.getElementById('file-pane') as HTMLElement, (cwd, path) => {
-  viewFileBtn.hidden = !path;
-  viewFileBtn.textContent = path ? (path.split('/').pop() ?? 'File') : 'File';
-  void window.cockpit?.store.setOpenFile(cwd, path);
-  // The file went away with its worktree — don't leave the operator staring at
-  // a pane with nothing in it.
-  if (!path && viewFileBtn.classList.contains('active')) setWorkspaceView('live');
+const fileTabs = new FileTabs(tabStrip, {
+  select: (cwd, path) => {
+    setWorkspaceView('file');
+    void fileView.open(cwd, path);
+  },
+  close: (cwd, path) => fileView.close(cwd, path),
+  closeOthers: (cwd, path) => fileView.closeOthers(cwd, path),
+  closeAll: () => {
+    if (activeWorktree) fileView.closeAll(activeWorktree.path);
+  },
 });
+
+const fileView = new FileView(
+  document.getElementById('file-pane') as HTMLElement,
+  fileTabs,
+  (cwd, state) => {
+    void window.cockpit?.store.setOpenFiles(cwd, state.open, state.active);
+    // The last tab just closed (or the worktree went away) while the File pane
+    // was the one showing — don't leave the operator staring at an empty pane.
+    if (!state.active && tabStrip.classList.contains('viewing')) {
+      setWorkspaceView('live');
+    }
+  },
+);
 
 /** Clicking a file in the rail is a request to look at it — so go there. */
 const fileTree = new FileTree(railFiles, (cwd, path) => {
@@ -301,7 +319,10 @@ const rail = new WorktreeRail(
     void setAgentWorktree(wt);
     void refreshModels();
     void fileTree.setWorktree(wt);
-    void restoreOpenFile(wt);
+    // Point the tab strip at this worktree's own open files, then top it up from
+    // the store the first time it's opened this run.
+    fileView.setWorktree(wt.path);
+    void restoreOpenFiles(wt);
     // Send/Stop speak for the selected worktree — refresh them on every switch.
     updateSendStop();
     // Picking a worktree is the start of typing at it — go straight to the box.
@@ -325,23 +346,29 @@ const rail = new WorktreeRail(
     cockpit.dropPane(path);
     drafts.delete(path);
     saveDraft(path);
+    restoredWorktrees.delete(path);
     fileTree.dropWorktree(path);
     fileView.dropWorktree(path);
   },
 );
 
 /**
- * Reopen the file this worktree was last left on, and expand the tree down to
- * it. The pane is loaded but not shown — coming back to a worktree shouldn't
- * yank the workspace off Live, only make the File tab ready.
+ * Reopen the tabs this worktree was last left with, and expand the tree down to
+ * the one that was showing. Only the first time it's opened this run — after
+ * that the FileView holds the live set and the store is merely following it. The
+ * tabs load but the workspace stays on whatever view it was on: coming back to a
+ * worktree shouldn't yank it off Live, only make its tabs ready.
  */
-async function restoreOpenFile(wt: Worktree) {
-  const stored = await window.cockpit?.store.openFile(wt.path);
+const restoredWorktrees = new Set<string>();
+async function restoreOpenFiles(wt: Worktree) {
+  if (restoredWorktrees.has(wt.path)) return;
+  restoredWorktrees.add(wt.path);
+  const stored = await window.cockpit?.store.openFiles(wt.path);
   // The rail may have been clicked again while this was in flight.
-  if (!stored || activeWorktree?.path !== wt.path) return;
-  await fileTree.reveal(stored);
+  if (!stored?.open.length || activeWorktree?.path !== wt.path) return;
+  if (stored.active) await fileTree.reveal(stored.active);
   if (activeWorktree?.path !== wt.path) return;
-  await fileView.open(wt.path, stored);
+  await fileView.restore(wt.path, stored);
 }
 
 type WorkspaceView = 'file' | 'live' | 'changes';
@@ -352,9 +379,13 @@ const el = (id: string) => document.getElementById(id) as HTMLElement;
  * The workspace shows exactly one pane. Keeping the mapping in one table is what
  * makes a fourth view an entry rather than another branch reaching over to hide
  * the other two by hand.
+ *
+ * The File view has no toggle button of its own — its files carry their own tabs
+ * in the strip to the left, and clicking one of those is how you land here — so
+ * its `tab` is null.
  */
-const VIEWS: Record<WorkspaceView, { pane: HTMLElement; tab: HTMLButtonElement }> = {
-  file: { pane: el('file-pane'), tab: el('view-file') as HTMLButtonElement },
+const VIEWS: Record<WorkspaceView, { pane: HTMLElement; tab: HTMLButtonElement | null }> = {
+  file: { pane: el('file-pane'), tab: null },
   live: { pane: el('diff'), tab: el('view-live') as HTMLButtonElement },
   changes: { pane: el('changes'), tab: el('view-changes') as HTMLButtonElement },
 };
@@ -362,23 +393,24 @@ const VIEWS: Record<WorkspaceView, { pane: HTMLElement; tab: HTMLButtonElement }
 function setWorkspaceView(view: WorkspaceView) {
   for (const [name, { pane, tab }] of Object.entries(VIEWS) as [
     WorkspaceView,
-    { pane: HTMLElement; tab: HTMLButtonElement },
+    { pane: HTMLElement; tab: HTMLButtonElement | null },
   ][]) {
     const on = name === view;
-    tab.classList.toggle('active', on);
+    tab?.classList.toggle('active', on);
     // The live diff is Monaco's own container: `hidden` leaves it a zero-height
     // box it never measures its way out of, so that one moves by display.
     if (name === 'live') pane.style.display = on ? '' : 'none';
     else pane.hidden = !on;
   }
+  // The active file tab lights up only while its pane is the one showing.
+  tabStrip.classList.toggle('viewing', view === 'file');
   // Same story for the editor — it sizes itself to a box that was just revealed.
   if (view === 'file') fileView.layout();
 }
 
-VIEWS.file.tab.addEventListener('click', () => setWorkspaceView('file'));
-VIEWS.live.tab.addEventListener('click', () => setWorkspaceView('live'));
+VIEWS.live.tab!.addEventListener('click', () => setWorkspaceView('live'));
 
-VIEWS.changes.tab.addEventListener('click', async () => {
+VIEWS.changes.tab!.addEventListener('click', async () => {
   setWorkspaceView('changes');
   const cwd = activeWorktree?.path;
   const diff = cwd && window.cockpit ? await window.cockpit.worktrees.diff(cwd) : '';
