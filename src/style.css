@@ -1140,6 +1140,29 @@ body {
   content: '▾';
 }
 
+/* The subagent row: its own glyph while it works (settling to the usual ✓/✘ on
+   completion), and a live "working… · N steps" tally that counts its inner tool
+   calls so the row reads as busy rather than a dead spinner. */
+.tool.subagent.running .tool-glyph::before {
+  content: '◆';
+  color: var(--accent);
+}
+
+.tool.subagent .tool-name {
+  color: var(--accent);
+}
+
+.tool-steps {
+  flex-shrink: 0;
+  color: var(--dim-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.tool.subagent.running .tool-steps {
+  color: var(--accent);
+}
+
 .tool-body {
   display: none;
   margin: 6px 0 0 20px;

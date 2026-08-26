@@ -50,7 +50,10 @@ export type AgentEvent =
   | { type: 'thinking'; text: string }
   | { type: 'say'; text: string }
   | { type: 'plan'; title: string; items: PlanItem[] }
-  | { type: 'tool_start'; id: string; name: string; summary: string; detail?: string }
+  // `parent` is the tool_use id of the subagent this call ran inside, when it
+  // ran inside one — the cockpit folds those into that subagent's row rather
+  // than scattering them across the transcript.
+  | { type: 'tool_start'; id: string; name: string; summary: string; detail?: string; parent?: string }
   | { type: 'tool_end'; id: string; ok: boolean; detail?: string }
   | { type: 'todos'; items: TodoItem[] }
   // The agent is asking the operator to choose. The turn blocks in the SDK until
