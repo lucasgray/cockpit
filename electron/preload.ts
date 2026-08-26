@@ -34,6 +34,7 @@ const bridge: CockpitBridge = {
   },
   files: {
     list: (cwd: string, dir: string) => ipcRenderer.invoke('files:list', cwd, dir),
+    stamps: (cwd: string, dirs: string[]) => ipcRenderer.invoke('files:stamps', cwd, dirs),
     read: (cwd: string, path: string) => ipcRenderer.invoke('files:read', cwd, path),
     write: (cwd: string, path: string, text: string, mtime: number) =>
       ipcRenderer.invoke('files:write', { cwd, path, text, mtime }),

@@ -2,10 +2,7 @@ import './style.css';
 import { registerCockpitTheme } from './theme';
 import { monaco } from './monaco-env';
 import { Cockpit, runStream } from './cockpit';
-import { mockSource } from './agent/mockSource';
-import { parseAgentStream, requestAgent } from './agent/claudeSource';
 import { electronSource } from './agent/electronSource';
-import { sampleFile } from './agent/sample';
 import { WorktreeRail } from './worktrees';
 import { IDLE_STATUS, type RunCommand, type RunStatus } from './runConfig';
 import { FileTree } from './fileTree';
@@ -310,7 +307,9 @@ function showRailView(view: string) {
   railWorktrees.hidden = files;
   railFiles.hidden = !files;
   railRefreshBtn.hidden = !files;
-  if (files) void fileTree.setWorktree(activeWorktree);
+  // Coming back to a tab that was hidden while the agent worked: catch the tree
+  // up now rather than a poll-tick later.
+  if (files) void fileTree.setWorktree(activeWorktree).then(() => fileTree.sync());
   void window.cockpit?.store.setRailView(view);
 }
 
@@ -336,8 +335,8 @@ let statsPoll = 0;
 /**
  * Reflect the *active* worktree's run state on Send/Stop. Runs are per-worktree,
  * so these buttons always speak for the selected one — a sibling running in the
- * background doesn't disable Send here. No-op in the browser, where there are no
- * worktrees and the mock path drives the button itself.
+ * background doesn't disable Send here. No-op in the browser, where there is no
+ * bridge and so nothing to run.
  */
 function updateSendStop() {
   if (!window.cockpit?.agent) return;
@@ -375,55 +374,38 @@ async function sendPrompt() {
   const prompt = promptInput.value.trim();
   if (!prompt) return;
 
-  // Desktop: each worktree has its own live session; several can run at once,
-  // each unspooling into its own transcript whether or not it's on screen.
-  if (window.cockpit?.agent) {
-    if (!activeWorktree) {
-      setStatusLine('Select a worktree in the left rail first.');
-      return;
-    }
-    const cwd = activeWorktree.path;
-    if (runningCwds.has(cwd)) return; // that worktree's turn is still going
-    promptInput.value = '';
-    runningCwds.add(cwd);
-    rail.setRunning(cwd, true);
-    updateSendStop();
-    syncStatsPoll();
-    try {
-      await runStream(cockpit, electronSource({ prompt, cwd }), { key: cwd, reset: false });
-    } finally {
-      runningCwds.delete(cwd);
-      rail.setRunning(cwd, false);
-      rail.refresh();
-      // The turn created, deleted and rewrote files — the tree and whatever is
-      // open in the editor are both out of date until this runs.
-      void fileTree.refresh();
-      void fileView.reconcile(cwd);
-      updateSendStop();
-      syncStatsPoll();
-    }
+  // Turns run against a worktree through the main process — in the browser there
+  // is no bridge and nothing to run against.
+  if (!window.cockpit?.agent) {
+    setStatusLine('Agent turns need the desktop app — run `npm run app`.');
+    return;
+  }
+  if (!activeWorktree) {
+    setStatusLine('Select a worktree in the left rail first.');
     return;
   }
 
-  // Browser: the toy /api/agent path, with a mock fallback.
-  sendBtn.disabled = true;
-  sendBtn.textContent = '● thinking…';
+  // Each worktree has its own live session; several can run at once, each
+  // unspooling into its own transcript whether or not it's on screen.
+  const cwd = activeWorktree.path;
+  if (runningCwds.has(cwd)) return; // that worktree's turn is still going
+  promptInput.value = '';
+  runningCwds.add(cwd);
+  rail.setRunning(cwd, true);
+  updateSendStop();
+  syncStatsPoll();
   try {
-    let res: Response;
-    try {
-      res = await requestAgent(prompt, sampleFile);
-    } catch {
-      await runStream(cockpit, mockSource());
-      return;
-    }
-    if (!res.ok || !res.body) {
-      await runStream(cockpit, mockSource());
-      return;
-    }
-    await runStream(cockpit, parseAgentStream(res));
+    await runStream(cockpit, electronSource({ prompt, cwd }), { key: cwd, reset: false });
   } finally {
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
+    runningCwds.delete(cwd);
+    rail.setRunning(cwd, false);
+    rail.refresh();
+    // The turn created, deleted and rewrote files — the tree and whatever is
+    // open in the editor are both out of date until this runs.
+    void fileTree.refresh();
+    void fileView.reconcile(cwd);
+    updateSendStop();
+    syncStatsPoll();
   }
 }
 

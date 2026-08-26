@@ -9,8 +9,6 @@ export type EditOp =
 
 export type PlanItem = { text: string; snippet?: Snippet };
 
-export type SampleFile = { path: string; language: string; content: string };
-
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
 
 export type TodoItem = { text: string; status: TodoStatus };

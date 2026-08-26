@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
 import { answerAgent, closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
-import { listDir, readFileContents, writeFileContents } from './files';
+import { dirStamps, listDir, readFileContents, writeFileContents } from './files';
 import {
   closeRun,
   detectRunCommand,
@@ -343,6 +343,9 @@ app.whenReady().then(() => {
   // Every file call proves its root is a known worktree before it touches disk.
   ipcMain.handle('files:list', async (_event, cwd: string, dir: string) =>
     listDir(await worktreeRoot(cwd), dir),
+  );
+  ipcMain.handle('files:stamps', async (_event, cwd: string, dirs: string[]) =>
+    dirStamps(await worktreeRoot(cwd), dirs),
   );
   ipcMain.handle('files:read', async (_event, cwd: string, file: string) =>
     readFileContents(await worktreeRoot(cwd), file),

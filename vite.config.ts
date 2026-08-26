@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite';
-import { anthropicAgentPlugin } from './src/agent/backend';
 import { resolvePort } from './src/port';
 
 export default defineConfig({
@@ -19,5 +18,4 @@ export default defineConfig({
     hmr: false,
     watch: { usePolling: true, interval: 300 },
   },
-  plugins: [anthropicAgentPlugin()],
 });

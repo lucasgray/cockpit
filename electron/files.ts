@@ -112,6 +112,31 @@ export async function listDir(root: string, rel: string): Promise<FileEntry[]> {
   return entries.filter((entry) => !ignored.has(entry.path)).sort(byKindThenName);
 }
 
+/**
+ * When each of these directories last changed shape.
+ *
+ * A directory's mtime moves when an entry is added, removed or renamed, and
+ * *not* when a file's contents change — which is exactly the question the tree
+ * polls with: of the directories I'm showing, which need listing again? Answering
+ * it costs a stat per open directory, against a readdir plus a `git check-ignore`
+ * per directory to list them all blindly.
+ *
+ * A directory that isn't there reads as 0, so one deleted under us comes back as
+ * changed rather than as an error every caller would have to unpick.
+ */
+export async function dirStamps(root: string, rels: string[]): Promise<Record<string, number>> {
+  const stamps = await Promise.all(
+    rels.map(async (rel) => {
+      try {
+        return [rel, (await stat(await resolveInside(root, rel || ''))).mtimeMs] as const;
+      } catch {
+        return [rel, 0] as const;
+      }
+    }),
+  );
+  return Object.fromEntries(stamps);
+}
+
 export async function readFileContents(root: string, rel: string): Promise<FileContents> {
   const file = await resolveInside(root, rel);
   const info = await stat(file);

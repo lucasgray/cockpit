@@ -9,14 +9,24 @@ import type { FileEntry, Worktree } from './bridge';
  * you navigate, and losing your place on each worktree click would make it
  * useless for exactly the thing you'd use it for.
  *
- * Listing is lazy and cached per directory. `refresh()` drops the cache without
- * touching what's expanded, which is what a turn ending in this worktree calls:
- * the agent creates and deletes files, and a tree that only matched the moment
- * you opened it would quietly go stale.
+ * Listing is lazy and cached per directory. Keeping that cache honest is the
+ * whole problem: the agent creates and deletes files while you watch, so a tree
+ * that only matched the moment you opened it goes stale within seconds.
+ *
+ * Two things keep it current. `refresh()` re-lists everything open, which a turn
+ * ending in this worktree calls. Between those, a poll asks the main process only
+ * for each open directory's mtime — a stat apiece, no readdir, no `git
+ * check-ignore` — and re-lists just the directories whose shape actually moved,
+ * so an added or deleted file shows up about a second after it happens rather
+ * than at the end of the turn. The poll idles whenever the rail is on its other
+ * tab; there's nothing to keep current that nobody is looking at.
  */
 
 /** The root directory's key. Paths below it are relative and POSIX-separated. */
 const ROOT = '';
+
+/** How often the open directories are checked for added/removed entries. */
+const SYNC_MS = 1_000;
 
 type TreeState = {
   /** Directories currently open, by relative path. */
@@ -25,10 +35,18 @@ type TreeState = {
   children: Map<string, FileEntry[]>;
   /** Why a directory wouldn't list, shown on the row that asked. */
   errors: Map<string, string>;
+  /** Last mtime seen per listed directory — what the poll compares against. */
+  stamps: Map<string, number>;
 };
 
 function newState(): TreeState {
-  return { expanded: new Set(), selected: null, children: new Map(), errors: new Map() };
+  return {
+    expanded: new Set(),
+    selected: null,
+    children: new Map(),
+    errors: new Map(),
+    stamps: new Map(),
+  };
 }
 
 export class FileTree {
@@ -39,10 +57,13 @@ export class FileTree {
   private states = new Map<string, TreeState>();
   /** Directories with a listing in flight, so a double click doesn't double-list. */
   private loading = new Set<string>();
+  /** A sync already in flight — ticks don't stack up behind a slow one. */
+  private syncing = false;
 
   constructor(container: HTMLElement, onOpen: (cwd: string, path: string) => void) {
     this.container = container;
     this.onOpen = onOpen;
+    window.setInterval(() => void this.sync(), SYNC_MS);
   }
 
   private state(): TreeState {
@@ -74,11 +95,52 @@ export class FileTree {
   /** Re-list everything open, keeping the shape. Cheap enough to call on a turn end. */
   async refresh() {
     if (!this.cwd || !window.cockpit) return;
+    const open = [ROOT, ...this.state().expanded];
+    await Promise.all(open.map((dir) => this.ensureDir(dir, true)));
+  }
+
+  /**
+   * One tick of the poll: re-list only the open directories whose mtime moved.
+   *
+   * The common case is that nothing did, and that case costs a stat per open
+   * directory and no repaint at all — which is what makes running this every
+   * second reasonable while the agent rewrites the worktree underneath it.
+   */
+  async sync() {
+    if (this.syncing || this.container.hidden || !this.cwd || !window.cockpit) return;
+    const cwd = this.cwd;
     const state = this.state();
     const open = [ROOT, ...state.expanded];
-    state.children.clear();
-    state.errors.clear();
-    await Promise.all(open.map((dir) => this.ensureDir(dir)));
+
+    this.syncing = true;
+    try {
+      const stamps = await window.cockpit.files.stamps(cwd, open);
+      // The rail may have been pointed elsewhere while that was in flight.
+      if (this.cwd !== cwd) return;
+
+      const changed: string[] = [];
+      let pruned = false;
+      for (const dir of open) {
+        const stamp = stamps[dir] ?? 0;
+        if (stamp === state.stamps.get(dir)) continue;
+        // Stamp 0 is a directory that is no longer there. Its parent's re-list
+        // drops the row; forget the subtree so it stops being polled for.
+        if (!stamp && dir !== ROOT) {
+          state.expanded.delete(dir);
+          state.children.delete(dir);
+          state.stamps.delete(dir);
+          pruned = true;
+        } else {
+          changed.push(dir);
+        }
+      }
+      if (changed.length) await Promise.all(changed.map((dir) => this.ensureDir(dir, true)));
+      else if (pruned) this.render();
+    } catch {
+      // A worktree deleted mid-flight, mostly. The next tick sorts it out.
+    } finally {
+      this.syncing = false;
+    }
   }
 
   /**
@@ -106,19 +168,33 @@ export class FileTree {
     this.render();
   }
 
-  /** List a directory once, then repaint. Errors land on the row that asked. */
-  private async ensureDir(dir: string) {
+  /**
+   * List a directory, then repaint. Errors land on the row that asked.
+   *
+   * `force` re-lists one already cached — and does it without dropping the old
+   * entries first, so a re-list swaps the rows in place instead of blinking the
+   * subtree through a "…" and back on every poll.
+   */
+  private async ensureDir(dir: string, force = false) {
     const cwd = this.cwd;
     if (!cwd || !window.cockpit) return;
     const state = this.state();
-    if (state.children.has(dir) || this.loading.has(`${cwd}:${dir}`)) return;
+    if ((state.children.has(dir) && !force) || this.loading.has(`${cwd}:${dir}`)) return;
 
     this.loading.add(`${cwd}:${dir}`);
     try {
+      // Stamped before the listing, never after: if the directory changes
+      // between the two, the stamp is the older one and the next poll re-lists.
+      // A wasted listing is the harmless direction to be wrong in; recording a
+      // stamp newer than the entries it goes with would hide the change for good.
+      const stamps = await window.cockpit.files.stamps(cwd, [dir]);
       const entries = await window.cockpit.files.list(cwd, dir);
       // The worktree may have been switched while this was in flight; the state
       // is keyed by path, so write it back to the one that asked either way.
-      this.states.get(cwd)?.children.set(dir, entries);
+      const asked = this.states.get(cwd);
+      asked?.children.set(dir, entries);
+      asked?.stamps.set(dir, stamps[dir] ?? 0);
+      asked?.errors.delete(dir);
     } catch (error) {
       this.states.get(cwd)?.errors.set(dir, String(error));
     } finally {

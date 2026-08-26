@@ -101,6 +101,12 @@ export type CockpitBridge = {
   files: {
     /** One directory's entries. Lazy: the tree asks again on each expand. */
     list: (cwd: string, dir: string) => Promise<FileEntry[]>;
+    /**
+     * When each of these directories last changed shape, by relative path — a
+     * stat apiece, so the tree can poll for added and deleted files and only
+     * re-list what actually moved. A missing directory reads as 0.
+     */
+    stamps: (cwd: string, dirs: string[]) => Promise<Record<string, number>>;
     read: (cwd: string, path: string) => Promise<FileContents>;
     /** `mtime` is the one from the matching `read`; a newer file is a conflict. */
     write: (cwd: string, path: string, text: string, mtime: number) => Promise<FileWriteResult>;
