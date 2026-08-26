@@ -86,6 +86,34 @@ The list is hand-maintained, which is the cost of the CLI not exposing one. It
 defers to the catalogue: if a later Claude Code starts advertising Opus 4.8
 itself, its row wins and ours is dropped rather than showing the model twice.
 
+### Pasting screenshots
+
+⌘⇧4, then ⌘V into the cockpit. The screenshot lands as a thumbnail above the
+prompt box and rides along with the next turn; images dragged in from Finder land
+the same way. A paste is claimed wherever the focus is, so it works straight off
+the shortcut without clicking into the box first — except over another editable
+surface, where the paste belongs to whatever is being edited. Send takes text, a
+screenshot, or both: a screenshot on its own is a whole prompt ("look at this"),
+and the images go ahead of the words in the message, which is the order the model
+reads them in.
+
+Each one is right-sized on the way in — scaled down to a 1568px long edge, which
+is the largest the API keeps anyway, so nothing is lost that the model would have
+seen. A retina ⌘⇧4 is routinely 3× that in each direction, i.e. 9× the pixels to
+carry and pay tokens for; the same 1MB capture arrives as ~400KB. Screenshots
+re-encode as PNG (that's mostly text and edges, and lossy compression is exactly
+wrong for it), photos stay JPEG, and anything already small enough is passed
+through untouched so an animated GIF survives.
+
+Sent images are kept, so a conversation comes back with its screenshots in it.
+They go to files under the app's userData directory rather than into the
+transcript, because a transcript is replayed from its event rows and a megabyte
+of base64 per screenshot would be read back in full every time a worktree was
+opened. The events name the file instead and the window loads it over a
+`cockpit-image://` scheme of the cockpit's own, rooted at that directory and
+refusing everything outside it. One folder per worktree, so a removed worktree's
+screenshots go the way its transcript and its port already do.
+
 ## Architecture
 
 The UI is driven entirely by a **stream of `AgentEvent`s** — any source that
@@ -99,6 +127,7 @@ rewrite.
 | `src/agent/electronSource.ts` | Desktop path: turns the main process's IPC event pushes back into an `AsyncGenerator<AgentEvent>`. |
 | `src/cockpit.ts` | The cockpit: conversation column, Monaco diff, the edit-streaming engine, and the pinned-thought decorations. |
 | `src/markdown.ts` | Escape-first Markdown renderer for transcript bubbles — nothing the model writes survives as live HTML. |
+| `src/images.ts` | Clipboard/drop → base64: decoding, right-sizing and re-encoding a pasted screenshot in the renderer. |
 | `src/settings.ts` | The cockpit's own agent config (shared by both processes), so behaviour doesn't depend on the operator's dotfiles. |
 | `src/worktrees.ts` | Worktree rail state + the selection that survives reloads. |
 | `src/bridge.ts` | The renderer↔main contract: `Worktree`, `AgentRunRequest`, `CockpitBridge`. |
@@ -107,6 +136,7 @@ rewrite.
 | `electron/preload.ts` | The only thing the renderer can reach — implements `CockpitBridge` over `ipcRenderer`. |
 | `electron/agentRunner.ts` | Drives the Claude Agent SDK `query()` loop, including the PreToolUse diff hook. |
 | `electron/store.ts` | SQLite (`node:sqlite`) in the app's userData dir — transcripts, sessions, settings. Never written into the repo under work. |
+| `electron/images.ts` | Pasted screenshots on disk beside that database, and the containment check behind the `cockpit-image://` scheme. |
 
 ## Ideas to poke at next
 

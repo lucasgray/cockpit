@@ -1,4 +1,4 @@
-import type { AgentEvent } from './agent/protocol';
+import type { AgentEvent, OutboundImage } from './agent/protocol';
 import type { CockpitSettings, EffortChoice, ModelChoice } from './settings';
 import type { RunCommand, RunEvent, RunStatus } from './runConfig';
 
@@ -17,8 +17,15 @@ export type Worktree = {
 };
 
 export type AgentRunRequest = {
+  /** May be empty when the operator sent nothing but screenshots. */
   prompt: string;
   cwd: string;
+  /**
+   * Screenshots pasted into the composer, base64 and already right-sized by the
+   * renderer (see src/images.ts). Only the bytes travel — the thumbnail's data
+   * URL stays on the renderer's side, so the payload isn't carried twice.
+   */
+  images?: OutboundImage[];
 };
 
 export type WorktreeCreateResult = {
