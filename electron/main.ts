@@ -473,9 +473,11 @@ app.whenReady().then(() => {
   ipcMain.handle('store:setSelectedWorktree', (_event, cwd: string | null) =>
     getStore().setSelectedWorktree(cwd),
   );
-  ipcMain.handle('store:openFile', (_event, cwd: string) => getStore().openFile(cwd));
-  ipcMain.handle('store:setOpenFile', (_event, cwd: string, file: string | null) =>
-    getStore().setOpenFile(cwd, file),
+  ipcMain.handle('store:openFiles', (_event, cwd: string) => getStore().openFiles(cwd));
+  ipcMain.handle(
+    'store:setOpenFiles',
+    (_event, cwd: string, open: string[], active: string | null) =>
+      getStore().setOpenFiles(cwd, open, active),
   );
   ipcMain.handle('store:draft', (_event, cwd: string) => getStore().draft(cwd));
   ipcMain.handle('store:setDraft', (_event, cwd: string, text: string) =>

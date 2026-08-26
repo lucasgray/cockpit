@@ -59,7 +59,6 @@ type Pane = {
 
 export class Cockpit {
   private conversations: HTMLElement;
-  private tabs: HTMLElement;
   private status: HTMLElement;
   private diffEditor: monaco.editor.IStandaloneDiffEditor;
   private models: monaco.editor.ITextModel[] = [];
@@ -93,7 +92,6 @@ export class Cockpit {
 
   constructor() {
     this.conversations = document.getElementById('conversation')!;
-    this.tabs = document.getElementById('tabs')!;
     this.status = document.getElementById('status')!;
     const diffContainer = document.getElementById('diff')!;
 
@@ -279,7 +277,6 @@ export class Cockpit {
     this.editGen++;
     this.turnBudget = TURN_BUDGET_MS;
     this.fastForward = false;
-    this.tabs.innerHTML = '';
     this.status.textContent = '';
     this.diffEditor.setModel(null);
     this.models.forEach((m) => m.dispose());
@@ -742,12 +739,6 @@ export class Cockpit {
 
   private startEdit(file: string, language: string, original: string) {
     this.appliedWhole = false;
-    this.tabs.innerHTML = '';
-    const tab = document.createElement('div');
-    tab.className = 'tab active';
-    tab.textContent = file;
-    this.tabs.append(tab);
-
     this.models.forEach((m) => m.dispose());
     const originalModel = monaco.editor.createModel(original, language);
     const modifiedModel = monaco.editor.createModel(original, language);

@@ -174,13 +174,30 @@ export class Store {
     this.writeMeta(key, JSON.stringify(values));
   }
 
-  /** The file open in each worktree's editor pane. */
-  openFile(cwd: string): string | null {
-    return this.record('openFiles')[cwd] ?? null;
+  /**
+   * The files open in each worktree's editor pane, and which one was showing.
+   * Stored as a JSON blob inside the same path→value map the single open file
+   * used to live in — a plain string left by an older build is read as one open
+   * file, so the last-opened tab survives the upgrade.
+   */
+  openFiles(cwd: string): { open: string[]; active: string | null } {
+    const raw = this.record('openFiles')[cwd];
+    if (!raw) return { open: [], active: null };
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { open?: unknown }).open)) {
+        const { open, active } = parsed as { open: unknown[]; active?: unknown };
+        const paths = open.filter((p): p is string => typeof p === 'string');
+        return { open: paths, active: typeof active === 'string' ? active : null };
+      }
+    } catch {
+      /* a plain path from before this held a list */
+    }
+    return { open: [raw], active: raw };
   }
 
-  setOpenFile(cwd: string, file: string | null) {
-    this.setRecordValue('openFiles', cwd, file ?? '');
+  setOpenFiles(cwd: string, open: string[], active: string | null) {
+    this.setRecordValue('openFiles', cwd, open.length ? JSON.stringify({ open, active }) : '');
   }
 
   /**

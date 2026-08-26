@@ -187,9 +187,10 @@ export type CockpitBridge = {
     clearTranscript: (cwd: string) => Promise<void>;
     selectedWorktree: () => Promise<string | null>;
     setSelectedWorktree: (cwd: string | null) => Promise<void>;
-    /** The file each worktree had open, so the app reopens where it was left. */
-    openFile: (cwd: string) => Promise<string | null>;
-    setOpenFile: (cwd: string, path: string | null) => Promise<void>;
+    /** The files each worktree had open and the one showing, so the app reopens
+     *  every tab where it was left. */
+    openFiles: (cwd: string) => Promise<{ open: string[]; active: string | null }>;
+    setOpenFiles: (cwd: string, open: string[], active: string | null) => Promise<void>;
     /**
      * The half-written prompt each worktree's composer was left holding, keyed
      * to the worktree like its transcript — so switching parks one draft and
