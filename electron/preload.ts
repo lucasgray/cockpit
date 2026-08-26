@@ -18,6 +18,10 @@ const bridge: CockpitBridge = {
       return () => ipcRenderer.removeListener('worktrees:hook', wrapped);
     },
   },
+  pr: {
+    status: (cwd: string) => ipcRenderer.invoke('pr:status', cwd),
+    open: (cwd: string) => ipcRenderer.invoke('pr:open', cwd),
+  },
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => {
       const runId = crypto.randomUUID();

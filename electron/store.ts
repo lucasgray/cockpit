@@ -19,6 +19,10 @@ import {
  * so history survives any change to how the UI draws a turn.
  */
 
+/** What's remembered about a worktree's PR between sessions — just enough to
+ *  label and link the button when gh itself can't be reached. */
+type PrRecord = { number: number; url: string };
+
 /** Newest events kept per worktree. Older ones are pruned as new turns land. */
 const TRANSCRIPT_LIMIT = 4_000;
 /** Inserts between prune sweeps — pruning on every append would be wasteful. */
@@ -237,6 +241,34 @@ export class Store {
 
   setEffort(cwd: string, effort: EffortChoice) {
     this.setPin('agentEffort', cwd, effort);
+  }
+
+  /**
+   * The last PR seen for each worktree — number and url. A remembered fallback
+   * for when `gh pr view` can't answer (offline, or gh not installed), so the
+   * button can still show "Update PR #N ↗" for a PR the cockpit has itself
+   * opened. Cleared when the worktree is removed.
+   */
+  private prs(): Record<string, PrRecord> {
+    const raw = this.readMeta('prs');
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, PrRecord>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  pr(cwd: string): PrRecord | null {
+    return this.prs()[cwd] ?? null;
+  }
+
+  setPr(cwd: string, pr: PrRecord | null) {
+    const all = this.prs();
+    if (pr === null) delete all[cwd];
+    else all[cwd] = pr;
+    this.writeMeta('prs', JSON.stringify(all));
   }
 
   // ---- worktree ports ----------------------------------------------------

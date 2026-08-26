@@ -1,4 +1,4 @@
-import type { Worktree, WorktreeRemoveResult } from './bridge';
+import type { PrInfo, Worktree, WorktreeRemoveResult } from './bridge';
 
 /**
  * Survives reloads and app restarts so the rail comes back where you left it.
@@ -37,6 +37,17 @@ export class WorktreeRail {
   private onRemoved: (path: string) => void;
   private activePath: string | null = null;
   private worktrees: Worktree[] = [];
+  /** The worktree whose actions drawer is open, if any. One at a time. */
+  private openPath: string | null = null;
+  /** Set for exactly the render that opens a drawer, so the unfold animation
+   *  plays once — not again on every repaint while it's open (PR status landing,
+   *  the confirm swapping in). */
+  private drawerOpening = false;
+  /** Open PRs discovered per worktree, so the drawer can say "Update PR #N". */
+  private prByPath = new Map<string, PrInfo>();
+  /** The worktree whose PR is being opened right now — its button shows a wait. */
+  private prBusy: string | null = null;
+  private prError: { path: string; message: string } | null = null;
   /** The worktree showing its delete confirmation, if any. */
   private confirmPath: string | null = null;
   /** Set while a removal is in flight, so the rail can't be acted on twice. */
@@ -60,6 +71,27 @@ export class WorktreeRail {
     this.container = container;
     this.onSelect = onSelect;
     this.onRemoved = onRemoved;
+
+    // Close the drawer on a click anywhere outside the rows — but not on a click
+    // that lands on a row, which the row's own handlers already resolve (its ⋯
+    // toggles, another row's ⋯ moves the single open drawer, its body selects
+    // and closes). Guarding on `.wt-row` also keeps this off the drawer's own
+    // buttons, so their clicks aren't swallowed by a re-render fired here first.
+    document.addEventListener('mousedown', (e) => {
+      if (!this.openPath) return;
+      if ((e.target as HTMLElement).closest('.wt-row')) return;
+      this.closeDrawer();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.openPath) this.closeDrawer();
+    });
+  }
+
+  private closeDrawer() {
+    this.openPath = null;
+    this.confirmPath = null;
+    this.prError = null;
+    this.render();
   }
 
   async load() {
@@ -95,9 +127,11 @@ export class WorktreeRail {
   /** Re-read git state (dirty flags, new branches) without dropping selection. */
   async refresh() {
     if (!window.cockpit) return;
-    // Don't yank a half-typed "+ New worktree" input or an open confirm out from
-    // under the user; the next uninterrupted refresh picks the changes up.
-    if (this.inputOpen || this.confirmPath || this.busy) return;
+    // Don't yank a half-typed "+ New worktree" input, an open drawer, or a
+    // confirm out from under the user; the next uninterrupted refresh picks the
+    // changes up. A 1.5s repaint mid-interaction would also restart the drawer's
+    // unfold and drop any in-flight PR call's feedback.
+    if (this.inputOpen || this.openPath || this.confirmPath || this.busy) return;
     try {
       this.worktrees = await window.cockpit.worktrees.list();
       this.render();
@@ -138,8 +172,12 @@ export class WorktreeRail {
   private row(wt: Worktree): HTMLElement {
     const row = document.createElement('div');
     // Selection reads on the row, not the button, so the outline encloses the
-    // gutter and any confirm/error line the row is carrying.
-    row.className = 'wt-row' + (wt.path === this.activePath ? ' active' : '');
+    // gutter and any drawer/error line the row is carrying. `.open` lifts the row
+    // while its drawer is out, without borrowing selection's accent border.
+    row.className =
+      'wt-row' +
+      (wt.path === this.activePath ? ' active' : '') +
+      (wt.path === this.openPath ? ' open' : '');
 
     if (this.busy?.path === wt.path) {
       row.classList.add('pending');
@@ -162,6 +200,9 @@ export class WorktreeRail {
         <span class="wt-branch">${wt.branch}</span>
       </div>`;
     item.addEventListener('click', () => {
+      // Selecting any row closes an open drawer — the drawer is per-row, and the
+      // one place row actions live, so it shouldn't outlive the row losing focus.
+      this.openPath = null;
       this.confirmPath = null;
       this.activePath = wt.path;
       writeStoredPath(wt.path);
@@ -171,10 +212,7 @@ export class WorktreeRail {
     row.append(item);
     row.append(this.gutter(wt));
 
-    if (this.confirmPath === wt.path) {
-      row.classList.add('confirming');
-      row.append(this.confirmControls(wt));
-    }
+    if (wt.path === this.openPath) row.append(this.drawer(wt));
     if (this.error?.path === wt.path) {
       const err = document.createElement('div');
       err.className = 'wt-error';
@@ -184,7 +222,7 @@ export class WorktreeRail {
     return row;
   }
 
-  /** The right-hand column: status dot on top, ✕ directly underneath it. */
+  /** The right-hand column: status dot on top, the ⋯ actions menu under it. */
   private gutter(wt: Worktree): HTMLElement {
     const col = document.createElement('div');
     col.className = 'wt-gutter';
@@ -199,20 +237,146 @@ export class WorktreeRail {
     slot.append(dot);
     col.append(slot);
 
-    // The main checkout is where the branches land — never removable from here.
+    // The main checkout is where the branches land — nothing in the drawer (open
+    // a PR, remove the worktree) applies to it, so it gets no ⋯ at all.
     if (!wt.isMain) {
-      const remove = document.createElement('button');
-      remove.className = 'wt-remove';
-      remove.textContent = '✕';
-      remove.title = 'Remove this worktree';
-      remove.addEventListener('click', () => {
-        this.confirmPath = this.confirmPath === wt.path ? null : wt.path;
+      const menu = document.createElement('button');
+      menu.className = 'wt-menu';
+      menu.textContent = '⋯';
+      menu.title = 'Worktree actions';
+      menu.setAttribute('aria-expanded', String(wt.path === this.openPath));
+      menu.addEventListener('click', (e) => {
+        // The document click-off handler ignores clicks on a row, so the toggle
+        // owns open and close: this stops that handler from firing at all.
+        e.stopPropagation();
+        const opening = this.openPath !== wt.path;
+        this.openPath = opening ? wt.path : null;
+        this.confirmPath = null;
+        this.prError = null;
         this.error = null;
+        this.drawerOpening = opening;
         this.render();
+        // Opening reveals whether a PR already exists, without blocking the
+        // unfold on the network round-trip.
+        if (opening) void this.loadPrStatus(wt);
       });
-      col.append(remove);
+      col.append(menu);
     }
     return col;
+  }
+
+  /**
+   * The row's actions drawer: open/update the PR, or remove the worktree. Every
+   * consequential action lives behind the same deliberate ⋯ click rather than a
+   * hover-revealed button. Remove swaps to its confirm in place, so there's never
+   * both a "Remove" and a "Delete" to pick between.
+   */
+  private drawer(wt: Worktree): HTMLElement {
+    const drawer = document.createElement('div');
+    drawer.className = 'wt-drawer' + (this.drawerOpening ? ' opening' : '');
+    // Consumed by the render that opens it; every later repaint leaves it out so
+    // the unfold keyframe doesn't replay.
+    this.drawerOpening = false;
+
+    if (this.confirmPath === wt.path) {
+      drawer.append(this.confirmControls(wt));
+      return drawer;
+    }
+
+    drawer.append(this.prControl(wt));
+
+    const remove = document.createElement('button');
+    remove.className = 'wt-drawer-btn wt-drawer-remove';
+    remove.textContent = '✕ Remove worktree';
+    remove.title = `Removes the worktree and deletes branch ${wt.branch}`;
+    remove.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.confirmPath = wt.path;
+      this.render();
+    });
+    drawer.append(remove);
+
+    if (this.prError?.path === wt.path) {
+      const err = document.createElement('div');
+      err.className = 'wt-drawer-error';
+      err.textContent = `⚠ ${this.prError.message}`;
+      drawer.append(err);
+    }
+    return drawer;
+  }
+
+  /** The PR button: "Open PR" until one exists, then "Update PR" with a link. */
+  private prControl(wt: Worktree): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'wt-pr';
+
+    const btn = document.createElement('button');
+    btn.className = 'wt-drawer-btn wt-pr-btn';
+    const pr = this.prByPath.get(wt.path);
+
+    if (this.prBusy === wt.path) {
+      btn.textContent = pr ? '⤴ Updating PR…' : '⤴ Opening PR…';
+      btn.disabled = true;
+    } else {
+      btn.textContent = pr ? `⤴ Update PR` : '⤴ Open PR';
+      btn.title = pr
+        ? `Push this branch to PR #${pr.number}`
+        : 'Push this branch and open a pull request';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this.openPr(wt);
+      });
+    }
+    wrap.append(btn);
+
+    // The link to an existing PR sits beside the button and opens in the real
+    // browser (the main process hands http(s) targets to the OS).
+    if (pr) {
+      const link = document.createElement('a');
+      link.className = 'wt-pr-link';
+      link.href = pr.url;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = `#${pr.number} ↗`;
+      link.addEventListener('click', (e) => e.stopPropagation());
+      wrap.append(link);
+    }
+    return wrap;
+  }
+
+  /** Look up whether the worktree's branch already has an open PR, and repaint
+   *  the drawer if it does — but only while it's still the open one. */
+  private async loadPrStatus(wt: Worktree) {
+    let pr: PrInfo | null;
+    try {
+      pr = await window.cockpit!.pr.status(wt.path);
+    } catch {
+      return; // No status is just "Open PR"; a failed lookup shouldn't shout.
+    }
+    if (!pr || this.openPath !== wt.path) return;
+    this.prByPath.set(wt.path, pr);
+    this.render();
+  }
+
+  private async openPr(wt: Worktree) {
+    if (this.prBusy) return;
+    this.prBusy = wt.path;
+    this.prError = null;
+    this.render();
+
+    try {
+      const res = await window.cockpit!.pr.open(wt.path);
+      if (res.ok && res.pr) this.prByPath.set(wt.path, res.pr);
+      else this.prError = { path: wt.path, message: res.error ?? 'failed' };
+    } catch (error) {
+      this.prError = { path: wt.path, message: String(error) };
+    } finally {
+      this.prBusy = null;
+    }
+
+    // The drawer may have been closed while the push ran; only repaint if it's
+    // still showing. The result is remembered either way.
+    if (this.openPath === wt.path) this.render();
   }
 
   /**
@@ -259,6 +423,7 @@ export class WorktreeRail {
 
   private async remove(wt: Worktree) {
     if (this.busy) return;
+    this.openPath = null;
     this.confirmPath = null;
     this.error = null;
     this.busy = { path: wt.path, label: 'deleting' };
