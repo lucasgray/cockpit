@@ -408,6 +408,10 @@ app.whenReady().then(() => {
   ipcMain.handle('store:setOpenFile', (_event, cwd: string, file: string | null) =>
     getStore().setOpenFile(cwd, file),
   );
+  ipcMain.handle('store:draft', (_event, cwd: string) => getStore().draft(cwd));
+  ipcMain.handle('store:setDraft', (_event, cwd: string, text: string) =>
+    getStore().setDraft(cwd, text),
+  );
   ipcMain.handle('store:thinking', (_event, cwd: string) => getStore().thinking(cwd));
   ipcMain.handle('store:setThinking', (_event, cwd: string, on: boolean) =>
     getStore().setThinking(cwd, on),
