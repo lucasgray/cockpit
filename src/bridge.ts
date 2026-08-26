@@ -157,6 +157,13 @@ export type CockpitBridge = {
     openFile: (cwd: string) => Promise<string | null>;
     setOpenFile: (cwd: string, path: string | null) => Promise<void>;
     /**
+     * The half-written prompt each worktree's composer was left holding, keyed
+     * to the worktree like its transcript — so switching parks one draft and
+     * brings back the other instead of carrying text across.
+     */
+    draft: (cwd: string) => Promise<string>;
+    setDraft: (cwd: string, text: string) => Promise<void>;
+    /**
      * Whether each worktree is in thinking mode — the composer's ✳ Thinking
      * toggle. Per-worktree, like the session it drives; the main process reads
      * it when a turn starts, so the renderer only has to write it.

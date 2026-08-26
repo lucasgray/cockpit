@@ -103,6 +103,72 @@ const viewFileBtn = document.getElementById('view-file') as HTMLButtonElement;
 let activeWorktree: Worktree | null = null;
 
 /**
+ * The composer is per-worktree, like the transcript above it: each worktree
+ * holds its own half-written prompt, so switching mid-sentence parks what you
+ * were saying here and brings back what you'd been saying over there.
+ *
+ * The live copy is this map, not the store: repainting the box on a switch has
+ * to be synchronous, or the first keystroke after a click lands in whichever
+ * worktree's draft the read happened to still be resolving. The store is the
+ * copy that survives a restart, written behind a short debounce so a long
+ * prompt is one write when the typing stops rather than one per key.
+ */
+const drafts = new Map<string, string>();
+const DRAFT_SAVE_MS = 400;
+/** A debounced save not yet landed, and the worktree whose text it carries. */
+let pendingDraft: { cwd: string; timer: number } | null = null;
+
+/** Push a worktree's draft through to the store now. */
+function saveDraft(cwd: string) {
+  if (pendingDraft?.cwd === cwd) {
+    clearTimeout(pendingDraft.timer);
+    pendingDraft = null;
+  }
+  void window.cockpit?.store.setDraft(cwd, drafts.get(cwd) ?? '');
+}
+
+/** The box changed — hold it against the active worktree and save it shortly. */
+function noteDraft() {
+  const cwd = activeWorktree?.path;
+  if (!cwd) return;
+  drafts.set(cwd, promptInput.value);
+  // A save still pending for another worktree is that worktree's last few
+  // keystrokes — land it rather than dropping it with its timer.
+  if (pendingDraft && pendingDraft.cwd !== cwd) saveDraft(pendingDraft.cwd);
+  if (pendingDraft) clearTimeout(pendingDraft.timer);
+  pendingDraft = { cwd, timer: window.setTimeout(() => saveDraft(cwd), DRAFT_SAVE_MS) };
+}
+
+/** Park the box's contents on the worktree they were typed at, before the
+ *  composer is pointed somewhere else. */
+function stashDraft() {
+  const cwd = activeWorktree?.path;
+  if (!cwd) return;
+  // An empty box at a worktree nothing has been typed at yet is not news — and
+  // its stored draft may still be in flight, which this would clobber with ''.
+  if (!drafts.has(cwd) && !promptInput.value) return;
+  drafts.set(cwd, promptInput.value);
+  // Don't leave the last keystrokes riding a timer the switch outlives.
+  if (pendingDraft?.cwd === cwd) saveDraft(cwd);
+}
+
+/**
+ * Bring back the prompt a worktree was left mid-typing. Only the first time
+ * it's opened this run — after that the map is the live copy and the store is
+ * merely following it.
+ */
+async function restoreDraft(wt: Worktree) {
+  if (drafts.has(wt.path)) return;
+  const stored = (await window.cockpit?.store.draft(wt.path)) ?? '';
+  // Anything typed while that was in flight is newer than what came back.
+  if (drafts.has(wt.path)) return;
+  drafts.set(wt.path, stored);
+  // The rail may have been clicked again — only the selected worktree's draft
+  // belongs in the box.
+  if (activeWorktree?.path === wt.path) promptInput.value = stored;
+}
+
+/**
  * The open file's tab appears only once there is one, and wears the file's own
  * name — the pane below it carries the full path.
  */
@@ -216,6 +282,9 @@ window.cockpit?.run.onEvent(({ cwd, status }) => {
 const rail = new WorktreeRail(
   railWorktrees,
   (wt) => {
+    // Park the half-written prompt on the worktree being left, before the box
+    // starts belonging to the new one.
+    stashDraft();
     activeWorktree = wt;
     activeWtLabel.textContent = wt.name;
     activeWtLabel.classList.add('set');
@@ -223,6 +292,10 @@ const rail = new WorktreeRail(
     // the stored one the first time it's opened this run.
     cockpit.showPane(wt.path);
     cockpit.restorePane(wt.path);
+    // The composer follows the transcript: this worktree's own draft, from the
+    // map if it's been open this run and from the store the first time.
+    promptInput.value = drafts.get(wt.path) ?? '';
+    void restoreDraft(wt);
     void setRunWorktree(wt);
     void setThinkingWorktree(wt);
     void setAgentWorktree(wt);
@@ -239,6 +312,9 @@ const rail = new WorktreeRail(
       activeWorktree = null;
       activeWtLabel.textContent = 'no worktree';
       activeWtLabel.classList.remove('set');
+      // Nothing to type at — and the draft belonged to a directory that no
+      // longer exists, so it goes with it rather than into the next worktree.
+      promptInput.value = '';
       cockpit.resetDiff();
       // The directory is gone; its run went with it in removeWorktree.
       void setRunWorktree(null);
@@ -247,6 +323,8 @@ const rail = new WorktreeRail(
       updateSendStop();
     }
     cockpit.dropPane(path);
+    drafts.delete(path);
+    saveDraft(path);
     fileTree.dropWorktree(path);
     fileView.dropWorktree(path);
   },
@@ -738,7 +816,11 @@ async function sendPrompt() {
   // unspooling into its own transcript whether or not it's on screen.
   const cwd = activeWorktree.path;
   if (runningCwds.has(cwd)) return; // that worktree's turn is still going
+  // Sent, so there's no draft left here — clear it in the store too, or coming
+  // back to this worktree would hand back a prompt already in the transcript.
   promptInput.value = '';
+  drafts.set(cwd, '');
+  saveDraft(cwd);
   // Handed to this turn, so a paste during it starts the next prompt's tray
   // rather than joining one already in flight.
   const images = attachments;
@@ -767,6 +849,12 @@ async function sendPrompt() {
 }
 
 sendBtn.addEventListener('click', sendPrompt);
+promptInput.addEventListener('input', noteDraft);
+// Clicking away is the moment a draft is most likely to be abandoned for a
+// while — land it now rather than trusting the debounce to outlive the window.
+promptInput.addEventListener('blur', () => {
+  if (pendingDraft) saveDraft(pendingDraft.cwd);
+});
 promptInput.addEventListener('keydown', (e) => {
   // Enter sends; Shift+Enter drops a newline into the box.
   if (e.key === 'Enter' && !e.shiftKey) {
