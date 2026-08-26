@@ -327,7 +327,9 @@ app.whenReady().then(() => {
       // transcript is written here — so record it too, or a restored
       // conversation would come back as Claude talking to nobody.
       store.appendEvent(req.cwd, { type: 'user', text: req.prompt });
-      return runAgent(req, (agentEvent: AgentEvent) => {
+      // Thinking mode is read here rather than sent with the prompt: the store
+      // is where the toggle lives, and this is the moment it has to be true.
+      return runAgent({ ...req, thinking: store.thinking(req.cwd) }, (agentEvent: AgentEvent) => {
         store.appendEvent(req.cwd, agentEvent);
         event.sender.send(`agent:event:${req.runId}`, agentEvent);
       });
@@ -370,6 +372,10 @@ app.whenReady().then(() => {
   ipcMain.handle('store:openFile', (_event, cwd: string) => getStore().openFile(cwd));
   ipcMain.handle('store:setOpenFile', (_event, cwd: string, file: string | null) =>
     getStore().setOpenFile(cwd, file),
+  );
+  ipcMain.handle('store:thinking', (_event, cwd: string) => getStore().thinking(cwd));
+  ipcMain.handle('store:setThinking', (_event, cwd: string, on: boolean) =>
+    getStore().setThinking(cwd, on),
   );
   ipcMain.handle('store:railView', () => getStore().railView());
   ipcMain.handle('store:setRailView', (_event, view: string) => getStore().setRailView(view));

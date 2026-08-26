@@ -22,6 +22,18 @@ the default with `COCKPIT_PROJECT_ROOT=/path/to/repo npm run app`.
 > The cockpit is the desktop app: worktrees and agent turns both live in the
 > Electron main process, so `npm run dev` on its own only serves the UI shell.
 
+### Thinking mode
+
+The **✳ Thinking** toggle in the composer (or **Tab**, as in Claude Code) drops
+the selected worktree into thinking mode. Off — the default — the model still
+reasons, but Claude Code omits the blocks, so all the cockpit can show is its
+spinner. On, thinking comes back summarized and streams into the transcript as
+`✳ thinking` bubbles above the answer.
+
+It's per-worktree, like the sessions themselves: one worktree can reason out loud
+while a sibling grinds. The setting sticks across restarts, and flipping it
+mid-turn lands on the next prompt rather than half-changing the one in flight.
+
 ## Architecture
 
 The UI is driven entirely by a **stream of `AgentEvent`s** — any source that

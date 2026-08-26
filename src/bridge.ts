@@ -142,6 +142,13 @@ export type CockpitBridge = {
     /** The file each worktree had open, so the app reopens where it was left. */
     openFile: (cwd: string) => Promise<string | null>;
     setOpenFile: (cwd: string, path: string | null) => Promise<void>;
+    /**
+     * Whether each worktree is in thinking mode — the composer's ✳ Thinking
+     * toggle. Per-worktree, like the session it drives; the main process reads
+     * it when a turn starts, so the renderer only has to write it.
+     */
+    thinking: (cwd: string) => Promise<boolean>;
+    setThinking: (cwd: string, on: boolean) => Promise<void>;
     /** Which left-rail tab was showing: 'worktrees' or 'explorer'. */
     railView: () => Promise<string | null>;
     setRailView: (view: string) => Promise<void>;

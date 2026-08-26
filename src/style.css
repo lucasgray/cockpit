@@ -158,6 +158,20 @@ body {
   border-color: var(--border-2);
 }
 
+/* A button that holds a state rather than firing an action — dim until it's on,
+   then lit the way an armed control should be. */
+.btn.toggle {
+  background: transparent;
+  color: var(--dim);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.btn.toggle.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 .btn:disabled {
   opacity: 0.6;
   cursor: default;
