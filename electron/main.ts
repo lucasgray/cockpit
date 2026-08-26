@@ -5,7 +5,14 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
 import type { Worktree, WorktreeCreateResult, WorktreeRemoveResult } from '../src/bridge';
-import { answerAgent, closeAgent, closeAllAgents, interruptAgent, runAgent } from './agentRunner';
+import {
+  answerAgent,
+  closeAgent,
+  closeAllAgents,
+  interruptAgent,
+  modelCatalog,
+  runAgent,
+} from './agentRunner';
 import { dirStamps, listDir, readFileContents, writeFileContents } from './files';
 import {
   closeRun,
@@ -18,7 +25,7 @@ import {
 } from './runner';
 import { ensurePort } from './ports';
 import { getStore, openStore } from './store';
-import type { CockpitSettings } from '../src/settings';
+import type { CockpitSettings, EffortChoice } from '../src/settings';
 import { resolvePort } from '../src/port';
 
 const execFileAsync = promisify(execFile);
@@ -327,15 +334,22 @@ app.whenReady().then(() => {
       // transcript is written here — so record it too, or a restored
       // conversation would come back as Claude talking to nobody.
       store.appendEvent(req.cwd, { type: 'user', text: req.prompt });
-      // Thinking mode is read here rather than sent with the prompt: the store
-      // is where the toggle lives, and this is the moment it has to be true.
-      return runAgent({ ...req, thinking: store.thinking(req.cwd) }, (agentEvent: AgentEvent) => {
+      // The three switchers are read here rather than sent with the prompt: the
+      // store is where they live, and this is the moment they have to be true.
+      // An unpinned model falls back to the cockpit's settings, then to the CLI.
+      const config = {
+        thinking: store.thinking(req.cwd),
+        model: store.model(req.cwd) || store.settings().model,
+        effort: store.effort(req.cwd),
+      };
+      return runAgent({ ...req, ...config }, (agentEvent: AgentEvent) => {
         store.appendEvent(req.cwd, agentEvent);
         event.sender.send(`agent:event:${req.runId}`, agentEvent);
       });
     },
   );
   ipcMain.handle('agent:interrupt', (_event, cwd: string) => interruptAgent(cwd));
+  ipcMain.handle('agent:models', () => modelCatalog());
   ipcMain.handle(
     'agent:answer',
     (_event, req: { cwd: string; id: string; selection: string }) =>
@@ -376,6 +390,14 @@ app.whenReady().then(() => {
   ipcMain.handle('store:thinking', (_event, cwd: string) => getStore().thinking(cwd));
   ipcMain.handle('store:setThinking', (_event, cwd: string, on: boolean) =>
     getStore().setThinking(cwd, on),
+  );
+  ipcMain.handle('store:model', (_event, cwd: string) => getStore().model(cwd));
+  ipcMain.handle('store:setModel', (_event, cwd: string, model: string) =>
+    getStore().setModel(cwd, model),
+  );
+  ipcMain.handle('store:effort', (_event, cwd: string) => getStore().effort(cwd));
+  ipcMain.handle('store:setEffort', (_event, cwd: string, effort: EffortChoice) =>
+    getStore().setEffort(cwd, effort),
   );
   ipcMain.handle('store:railView', () => getStore().railView());
   ipcMain.handle('store:setRailView', (_event, view: string) => getStore().setRailView(view));

@@ -8,6 +8,12 @@ import { IDLE_STATUS, type RunCommand, type RunStatus } from './runConfig';
 import { FileTree } from './fileTree';
 import { FileView } from './fileView';
 import type { Worktree } from './bridge';
+import {
+  FALLBACK_MODELS,
+  UNLISTED_MODELS,
+  type EffortChoice,
+  type ModelChoice,
+} from './settings';
 
 registerCockpitTheme();
 monaco.editor.setTheme('cockpit-dark');
@@ -41,6 +47,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
             <button id="thinking" class="btn toggle" aria-pressed="false">✳ Thinking</button>
+            <select id="model" class="picker" aria-label="Model"></select>
+            <select id="effort" class="picker" aria-label="Effort"></select>
             <div class="spacer"></div>
             <button id="stop" class="btn danger" hidden>■ Stop</button>
             <button id="send" class="btn primary">Send</button>
@@ -71,6 +79,8 @@ const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
 const thinkingBtn = document.getElementById('thinking') as HTMLButtonElement;
+const modelPicker = document.getElementById('model') as HTMLSelectElement;
+const effortPicker = document.getElementById('effort') as HTMLSelectElement;
 const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 // The two rail views get their own containers rather than sharing one: the
 // worktree rail re-renders on a 1.5s poll while a turn runs, and that would
@@ -205,6 +215,8 @@ const rail = new WorktreeRail(
     cockpit.restorePane(wt.path);
     void setRunWorktree(wt);
     void setThinkingWorktree(wt);
+    void setAgentWorktree(wt);
+    void refreshModels();
     void fileTree.setWorktree(wt);
     void restoreOpenFile(wt);
     // Send/Stop speak for the selected worktree — refresh them on every switch.
@@ -221,6 +233,7 @@ const rail = new WorktreeRail(
       // The directory is gone; its run went with it in removeWorktree.
       void setRunWorktree(null);
       void setThinkingWorktree(null);
+      void setAgentWorktree(null);
       updateSendStop();
     }
     cockpit.dropPane(path);
@@ -421,6 +434,167 @@ thinkingBtn.addEventListener('click', toggleThinking);
 // `thinkingOn` is initialized, and reading it there is a startup crash.
 paintThinking();
 
+/**
+ * The model and effort switchers, beside ✳ Thinking and per-worktree for the
+ * same reason: they speak for the selected worktree only. Pin the worktree
+ * holding the hard problem to Opus at max effort and leave the mechanical one on
+ * Haiku, and the two run side by side without either one's setting leaking.
+ *
+ * Both default to unpinned — the CLI's own choice — rather than to an opinion of
+ * the cockpit's. Like thinking mode they're written to the store here and read
+ * back in the main process when a turn starts, so a change mid-turn lands on the
+ * next prompt instead of half-changing the one in flight.
+ */
+let catalogue: ModelChoice[] = FALLBACK_MODELS;
+let modelId = '';
+let effortLevel: EffortChoice = '';
+
+/**
+ * Every row the switcher offers: what the CLI advertises, then the generation it
+ * doesn't. The catalogue wins on collision — if a later Claude Code starts
+ * listing Opus 4.8 itself, its own row replaces ours rather than doubling up.
+ *
+ * The catalogue ships a "Default (recommended)" row that means exactly what the
+ * unpinned entry means, so it's dropped here rather than offered twice.
+ */
+function rows(): ModelChoice[] {
+  const listed = catalogue.filter((m) => m.value !== 'default');
+  const known = new Set(listed.flatMap((m) => [m.value, m.resolvedModel ?? m.value]));
+  return [...listed, ...UNLISTED_MODELS.filter((m) => !known.has(m.value))];
+}
+
+/**
+ * The catalogue starts as the built-in list and becomes the installed CLI's real
+ * one as soon as any session has opened to be asked — so this runs on every
+ * worktree switch and at the end of every turn, not just at startup.
+ */
+async function refreshModels() {
+  const live = (await window.cockpit?.agent.models()) ?? [];
+  if (!live.length) return;
+  catalogue = live;
+  adoptCatalogueId();
+  paintPickers();
+}
+
+/** The pinned model's row, or null when unpinned or pinned to an unknown id. */
+function pinnedModel(): ModelChoice | null {
+  return rows().find((m) => m.value === modelId || m.resolvedModel === modelId) ?? null;
+}
+
+/**
+ * Rewrite a pin the arriving catalogue spells differently — `claude-opus-5` from
+ * the built-in list where the live one says `opus`. Both reach the same model, so
+ * this is cosmetic to the turn, but the switcher can only show a row it can name:
+ * left alone, the pin selects nothing and the picker reads "default" while the
+ * store still says Opus. Move the pin onto the row instead of showing a lie.
+ */
+function adoptCatalogueId() {
+  const row = pinnedModel();
+  if (!row || row.value === modelId) return;
+  modelId = row.value;
+  const cwd = activeWorktree?.path;
+  if (cwd) void window.cockpit?.store.setModel(cwd, modelId);
+}
+
+function option(select: HTMLSelectElement, value: string, label: string, hint?: string) {
+  const el = document.createElement('option');
+  el.value = value;
+  el.textContent = label;
+  // The names alone don't distinguish generations — "Opus (1M context)" could be
+  // any Opus. The CLI's description does, so hang it off the row.
+  if (hint) el.title = hint;
+  select.append(el);
+}
+
+function paintPickers() {
+  const ready = !!window.cockpit && !!activeWorktree;
+
+  modelPicker.replaceChildren();
+  option(modelPicker, '', 'Model: default', "Whatever Claude Code picks on its own");
+  for (const model of rows()) option(modelPicker, model.value, model.label, model.description);
+  // A worktree pinned to something no list names — a model that went away, or a
+  // pin written by an older build. Keep it selectable rather than silently
+  // repointing the worktree at the default.
+  if (modelId && !pinnedModel()) option(modelPicker, modelId, modelId, 'No longer offered');
+  modelPicker.value = modelId;
+  modelPicker.disabled = !ready;
+  modelPicker.classList.toggle('set', !!modelId);
+  modelPicker.title = !window.cockpit
+    ? 'Switching models needs the desktop app'
+    : !activeWorktree
+      ? 'Select a worktree first'
+      : modelId
+        ? `${activeWorktree.name} is pinned to ${pinnedModel()?.description ?? modelId}`
+        : `${activeWorktree.name} runs on Claude Code's default model`;
+
+  // Effort is only offered where the model takes one — an unpinned model has no
+  // levels to offer, because until one is picked we don't know whose they'd be.
+  const levels = pinnedModel()?.effortLevels ?? [];
+  effortPicker.replaceChildren();
+  option(effortPicker, '', 'Effort: default');
+  for (const level of levels) option(effortPicker, level, `Effort: ${level}`);
+  // A level this model doesn't list — a pin from before the real catalogue said
+  // how far this one goes. It's still what the next turn will send, so show it;
+  // a select with no matching option would quietly read "default" instead.
+  if (effortLevel && !levels.includes(effortLevel)) {
+    option(effortPicker, effortLevel, `Effort: ${effortLevel}`);
+  }
+  effortPicker.value = effortLevel;
+  effortPicker.disabled = !ready || (!levels.length && !effortLevel);
+  effortPicker.classList.toggle('set', !!effortLevel);
+  effortPicker.title = !ready
+    ? 'Select a worktree first'
+    : !levels.length
+      ? modelId
+        ? `${pinnedModel()?.label ?? modelId} has no effort setting`
+        : 'Pin a model to choose how hard it works'
+      : `How hard ${activeWorktree?.name} thinks before it answers`;
+}
+
+/** Adopt a worktree's pins; it may have been left on either last session. */
+async function setAgentWorktree(wt: Worktree | null) {
+  modelId = '';
+  effortLevel = '';
+  paintPickers();
+  if (!window.cockpit || !wt) return;
+  const [model, effort] = await Promise.all([
+    window.cockpit.store.model(wt.path),
+    window.cockpit.store.effort(wt.path),
+  ]);
+  // The rail may have been clicked again while those were in flight.
+  if (activeWorktree?.path !== wt.path) return;
+  modelId = model;
+  effortLevel = effort;
+  paintPickers();
+}
+
+modelPicker.addEventListener('change', () => {
+  const cwd = activeWorktree?.path;
+  if (!cwd || !window.cockpit) return;
+  modelId = modelPicker.value;
+  void window.cockpit.store.setModel(cwd, modelId);
+  // The new model may not take the effort the old one was set to — Haiku takes
+  // none, and the 4.6 generation has no `xhigh`. Drop it rather than sending the
+  // next turn a level it rejects.
+  const levels = pinnedModel()?.effortLevels ?? [];
+  if (effortLevel && !levels.includes(effortLevel)) {
+    effortLevel = '';
+    void window.cockpit.store.setEffort(cwd, '');
+  }
+  paintPickers();
+});
+
+effortPicker.addEventListener('change', () => {
+  const cwd = activeWorktree?.path;
+  if (!cwd || !window.cockpit) return;
+  effortLevel = effortPicker.value as EffortChoice;
+  void window.cockpit.store.setEffort(cwd, effortLevel);
+  paintPickers();
+});
+
+paintPickers();
+void refreshModels();
+
 stopBtn.addEventListener('click', () => {
   if (activeWorktree && runningCwds.has(activeWorktree.path)) {
     window.cockpit?.agent.interrupt(activeWorktree.path);
@@ -461,6 +635,9 @@ async function sendPrompt() {
     // open in the editor are both out of date until this runs.
     void fileTree.refresh();
     void fileView.reconcile(cwd);
+    // That turn may have been the first session to open — which is the moment
+    // the switcher can stop guessing at the model list and read the real one.
+    void refreshModels();
     updateSendStop();
     syncStatsPoll();
   }

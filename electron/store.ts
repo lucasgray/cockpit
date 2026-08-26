@@ -1,7 +1,14 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import type { AgentEvent } from '../src/agent/protocol';
-import { DEFAULT_SETTINGS, normalizeSettings, type CockpitSettings } from '../src/settings';
+import {
+  DEFAULT_SETTINGS,
+  EFFORT_LEVELS,
+  normalizeSettings,
+  type CockpitSettings,
+  type EffortChoice,
+  type EffortLevel,
+} from '../src/settings';
 
 /**
  * Everything the cockpit remembers, in one SQLite file under the app's own
@@ -185,6 +192,51 @@ export class Store {
     if (on) cwds.add(cwd);
     else cwds.delete(cwd);
     this.writeMeta('thinking', JSON.stringify([...cwds]));
+  }
+
+  /**
+   * The model and effort each worktree is pinned to — the composer's two
+   * switchers, per-worktree for the same reason thinking mode is. A cheap
+   * mechanical worktree can grind on Haiku while the one holding the hard problem
+   * sits on Opus at max effort, and neither disturbs the other.
+   *
+   * Absent means unpinned, which is not the same as a value: the turn then falls
+   * back to the cockpit's own settings, and past that to whatever the CLI does
+   * on its own.
+   */
+  private pins(key: 'agentModel' | 'agentEffort'): Record<string, string> {
+    const raw = this.readMeta(key);
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private setPin(key: 'agentModel' | 'agentEffort', cwd: string, value: string) {
+    const pins = this.pins(key);
+    if (value) pins[cwd] = value;
+    else delete pins[cwd];
+    this.writeMeta(key, JSON.stringify(pins));
+  }
+
+  model(cwd: string): string {
+    return this.pins('agentModel')[cwd] ?? '';
+  }
+
+  setModel(cwd: string, model: string) {
+    this.setPin('agentModel', cwd, model);
+  }
+
+  effort(cwd: string): EffortChoice {
+    const stored = this.pins('agentEffort')[cwd];
+    return EFFORT_LEVELS.includes(stored as EffortLevel) ? (stored as EffortLevel) : '';
+  }
+
+  setEffort(cwd: string, effort: EffortChoice) {
+    this.setPin('agentEffort', cwd, effort);
   }
 
   // ---- worktree ports ----------------------------------------------------

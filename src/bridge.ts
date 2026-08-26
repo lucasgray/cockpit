@@ -1,5 +1,5 @@
 import type { AgentEvent } from './agent/protocol';
-import type { CockpitSettings } from './settings';
+import type { CockpitSettings, EffortChoice, ModelChoice } from './settings';
 import type { RunCommand, RunEvent, RunStatus } from './runConfig';
 
 export type Worktree = {
@@ -92,6 +92,13 @@ export type CockpitBridge = {
     interrupt: (cwd: string) => Promise<void>;
     /** Answer a pending `question` event, unblocking the ask tool's turn. */
     answer: (cwd: string, id: string, selection: string) => Promise<void>;
+    /**
+     * What the installed Claude Code can reach, for the composer's model
+     * switcher — including which effort levels each model takes. Empty until a
+     * session has opened to ask, since that is the only way to find out; the
+     * switcher shows `FALLBACK_MODELS` until then.
+     */
+    models: () => Promise<ModelChoice[]>;
   };
   /**
    * Browsing and editing what a worktree holds. Every path is relative to the
@@ -149,6 +156,15 @@ export type CockpitBridge = {
      */
     thinking: (cwd: string) => Promise<boolean>;
     setThinking: (cwd: string, on: boolean) => Promise<void>;
+    /**
+     * The model and effort each worktree is pinned to — the composer's other two
+     * switchers, read at turn start exactly like thinking mode. '' means
+     * unpinned: the turn falls back to the cockpit's settings, then to the CLI.
+     */
+    model: (cwd: string) => Promise<string>;
+    setModel: (cwd: string, model: string) => Promise<void>;
+    effort: (cwd: string) => Promise<EffortChoice>;
+    setEffort: (cwd: string, effort: EffortChoice) => Promise<void>;
     /** Which left-rail tab was showing: 'worktrees' or 'explorer'. */
     railView: () => Promise<string | null>;
     setRailView: (view: string) => Promise<void>;

@@ -1,6 +1,7 @@
 import type {
   HookJSONOutput,
   HookInput,
+  ModelInfo,
   PermissionResult,
   Query,
   SDKUserMessage,
@@ -10,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
 import type { AgentEvent, TodoItem, TodoStatus } from '../src/agent/protocol';
+import { EFFORT_LEVELS, type EffortChoice, type ModelChoice } from '../src/settings';
 
 /** The MCP tool the model uses to ask the operator a question (see start()). */
 const ASK_TOOL = 'mcp__cockpit__ask';
@@ -36,6 +38,70 @@ function loadSdk(): Promise<AgentSdk> {
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
+
+/**
+ * How a turn is driven — the three composer controls, read from the store when
+ * the turn starts. They travel together because they change together: each one
+ * has both a spawn-time form and a mid-session control request, and which of the
+ * two applies depends only on whether this worktree's query is already open.
+ */
+export type TurnConfig = {
+  thinking: boolean;
+  /** Model id, or '' for the CLI's default. */
+  model: string;
+  effort: EffortChoice;
+};
+
+/**
+ * What the installed Claude Code says it can reach, cached for the window's life.
+ *
+ * The list is a property of the CLI rather than of any one worktree, so the first
+ * session to open fills it in for every switcher in the app. There is no way to
+ * ask without a live query — hence a cache seeded off whichever session happens
+ * to start first, and `FALLBACK_MODELS` in the renderer until one does.
+ */
+let catalog: ModelChoice[] | null = null;
+let catalogPending: Promise<void> | null = null;
+
+/**
+ * Effort is only offered where the CLI says it is supported. A model that
+ * reports nothing gets an empty list rather than the full set: sending `effort`
+ * to a model that has none is an error, and a missing switcher is cheaper to
+ * live with than a turn that won't start.
+ */
+function toChoice(model: ModelInfo): ModelChoice {
+  const levels = model.supportedEffortLevels ?? (model.supportsEffort ? EFFORT_LEVELS : []);
+  return {
+    value: model.value,
+    label: model.displayName || model.value,
+    ...(model.resolvedModel ? { resolvedModel: model.resolvedModel } : {}),
+    ...(model.description ? { description: model.description } : {}),
+    effortLevels: model.supportsEffort === false ? [] : levels,
+  };
+}
+
+function fillCatalog(query: Query) {
+  if (catalog || catalogPending) return;
+  catalogPending = query
+    .supportedModels()
+    .then((models) => {
+      if (models.length) catalog = models.map(toChoice);
+    })
+    .catch((error) => {
+      // An older CLI without the control request, or one still coming up. The
+      // switcher falls back to its built-in list; nothing about the turn changes.
+      console.error('[cockpit] model list unavailable:', (error as Error).message);
+    })
+    .finally(() => {
+      catalogPending = null;
+    });
+}
+
+/** The model switcher's rows, or [] if no session has opened to ask yet. */
+export async function modelCatalog(): Promise<ModelChoice[]> {
+  if (catalogPending) await catalogPending;
+  return catalog ?? [];
+}
 
 function languageFor(file: string): string {
   switch (path.extname(file).toLowerCase()) {
@@ -230,6 +296,13 @@ class Session {
    * the transcript grows a ✳ thinking bubble as the reasoning streams in.
    */
   private thinking = false;
+  /**
+   * The model and effort this session is running on — the composer's two
+   * switchers. Both are '' until the operator pins one, which means "send
+   * nothing" and leaves the CLI on its own defaults.
+   */
+  private model = '';
+  private effort: EffortChoice = '';
   /** Open ask-tool calls, by question id, waiting for the operator's answer. */
   private pendingQuestions = new Map<string, (answer: string) => void>();
 
@@ -346,8 +419,11 @@ class Session {
         cwd: this.cwd,
         permissionMode: 'default',
         includePartialMessages: true,
-        // Left unset when off, so a plain session keeps the CLI's own defaults.
+        // All three are left unset when unpinned, so a plain session keeps the
+        // CLI's own defaults rather than having the cockpit's opinion imposed.
         ...(this.thinking ? { thinking: { type: 'adaptive' as const, display: 'summarized' as const } } : {}),
+        ...(this.model ? { model: this.model } : {}),
+        ...(this.effort ? { effort: this.effort } : {}),
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
@@ -363,6 +439,8 @@ class Session {
         maxTurns: 100,
       },
     });
+    // First session up fills the model switcher for the whole app.
+    fillCatalog(this.query);
     this.pump = this.drain(this.query).catch((error) => {
       this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) });
       this.finishTurn();
@@ -462,18 +540,59 @@ class Session {
   }
 
   /**
-   * Send one prompt and resolve when that turn finishes. Thinking mode rides
-   * along on every prompt rather than on a channel of its own: the operator can
-   * flip it with no session open, or mid-turn, and either way the value that
-   * matters is the one in force when the next turn starts.
+   * Push the composer's model and effort onto a query that is already open.
+   *
+   * Same shape as applyThinking, and open for the same reason: both are spawn
+   * options, and these sessions outlive any one turn by design. Effort goes
+   * through the flag-settings layer rather than a setter of its own — that layer
+   * sits above the user's settings files and below managed policy, which is
+   * exactly where a switcher in this app belongs. Passing `null` clears it back
+   * to whatever those lower layers say.
    */
-  async send(prompt: string, thinking: boolean, sink: (event: AgentEvent) => void): Promise<void> {
+  private async applyModel() {
+    if (!this.query) return;
+    try {
+      await this.query.setModel(this.model || undefined);
+    } catch (error) {
+      // The turn is about to run either way — on the old model, which is the
+      // safe half of this failure. Say so rather than failing the prompt.
+      this.emit({ type: 'error', message: `Could not switch model: ${(error as Error).message}` });
+    }
+  }
+
+  private async applyEffort() {
+    if (!this.query) return;
+    try {
+      await this.query.applyFlagSettings({ effortLevel: this.effort || null });
+    } catch (error) {
+      this.emit({ type: 'error', message: `Could not set effort: ${(error as Error).message}` });
+    }
+  }
+
+  /**
+   * Send one prompt and resolve when that turn finishes. The three switchers ride
+   * along on every prompt rather than on channels of their own: the operator can
+   * flip any of them with no session open, or mid-turn, and either way the value
+   * that matters is the one in force when the next turn starts.
+   */
+  async send(prompt: string, config: TurnConfig, sink: (event: AgentEvent) => void): Promise<void> {
     this.sink = sink;
-    const changed = thinking !== this.thinking;
-    this.thinking = thinking;
-    // A fresh query takes it as a spawn option; an open one has to be told.
-    if (!this.query) await this.start();
-    else if (changed) await this.applyThinking();
+    const changed = {
+      thinking: config.thinking !== this.thinking,
+      model: config.model !== this.model,
+      effort: config.effort !== this.effort,
+    };
+    this.thinking = config.thinking;
+    this.model = config.model;
+    this.effort = config.effort;
+    // A fresh query takes all three as spawn options; an open one has to be told.
+    if (!this.query) {
+      await this.start();
+    } else {
+      if (changed.thinking) await this.applyThinking();
+      if (changed.model) await this.applyModel();
+      if (changed.effort) await this.applyEffort();
+    }
 
     this.inbox.push({
       type: 'user',
@@ -529,11 +648,11 @@ function sessionFor(cwd: string): Session {
 }
 
 export async function runAgent(
-  req: { prompt: string; cwd: string; thinking: boolean },
+  req: { prompt: string; cwd: string } & TurnConfig,
   send: (event: AgentEvent) => void,
 ): Promise<void> {
   try {
-    await sessionFor(req.cwd).send(req.prompt, req.thinking, send);
+    await sessionFor(req.cwd).send(req.prompt, req, send);
   } catch (error) {
     send({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     send({ type: 'done' });
