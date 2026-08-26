@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
@@ -301,6 +301,27 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
     },
+  });
+
+  // A transcript link is a destination out on the web, not a second cockpit:
+  // hand it to the user's real browser instead of spawning a bare Electron
+  // window. setWindowOpenHandler catches the target="_blank" anchors the
+  // markdown renderer emits (http(s) and mailto — the only hrefs it allows);
+  // will-navigate catches anything that would replace the app itself with an
+  // off-origin page. Same-origin navigation (a dev-server reload) is left alone.
+  const openExternally = (url: string) => {
+    if (/^(?:https?:\/\/|mailto:)/i.test(url)) void shell.openExternal(url);
+  };
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    const here = new URL(win.webContents.getURL());
+    if (new URL(url).origin !== here.origin) {
+      event.preventDefault();
+      openExternally(url);
+    }
   });
 
   // A run belongs to the app, not to a call, so its status goes straight to the
