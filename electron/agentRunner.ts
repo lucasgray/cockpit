@@ -14,6 +14,16 @@ import type { AgentEvent, TodoItem, TodoStatus } from '../src/agent/protocol';
 /** The MCP tool the model uses to ask the operator a question (see start()). */
 const ASK_TOOL = 'mcp__cockpit__ask';
 
+/**
+ * Thinking budget used when the operator drops a session into thinking mode.
+ *
+ * Only meaningful mid-session: `setMaxThinkingTokens` is the sole way to change
+ * thinking on an already-open query, and on current models any non-zero value
+ * just means "adaptive" — the number is a real budget only on older ones. A
+ * fresh session gets `thinking: { type: 'adaptive' }` instead, and never sees it.
+ */
+const THINKING_BUDGET = 16_000;
+
 // The Agent SDK is ESM-only, but this Electron main is bundled to CommonJS.
 // A static import compiles to require() and throws ERR_REQUIRE_ESM, so load it
 // through a native dynamic import() that esbuild won't rewrite to require().
@@ -212,6 +222,14 @@ class Session {
   private closed = false;
   private pump: Promise<void> | null = null;
   private interrupted = false;
+  /**
+   * Whether this session is in thinking mode — see the composer's ✳ Thinking
+   * toggle. Off is not "no thinking": the model reasons either way, but Claude
+   * Code's default display omits the blocks, so the cockpit receives empty
+   * `thinking` deltas and shows a spinner. On asks for summarized thinking, and
+   * the transcript grows a ✳ thinking bubble as the reasoning streams in.
+   */
+  private thinking = false;
   /** Open ask-tool calls, by question id, waiting for the operator's answer. */
   private pendingQuestions = new Map<string, (answer: string) => void>();
 
@@ -328,6 +346,8 @@ class Session {
         cwd: this.cwd,
         permissionMode: 'default',
         includePartialMessages: true,
+        // Left unset when off, so a plain session keeps the CLI's own defaults.
+        ...(this.thinking ? { thinking: { type: 'adaptive' as const, display: 'summarized' as const } } : {}),
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
@@ -421,10 +441,39 @@ class Session {
     this.finishTurn();
   }
 
-  /** Send one prompt and resolve when that turn finishes. */
-  async send(prompt: string, sink: (event: AgentEvent) => void): Promise<void> {
+  /**
+   * Push thinking mode onto a query that is already open. `setMaxThinkingTokens`
+   * is deprecated in favour of the `thinking` option, but that option is read
+   * once at spawn, and these sessions are long-lived by design — this control
+   * request is the only seam that reaches one mid-flight. Passing `null` clears
+   * both the budget and the display override, which is exactly "back to normal".
+   */
+  private async applyThinking() {
+    if (!this.query) return;
+    try {
+      await this.query.setMaxThinkingTokens(
+        this.thinking ? THINKING_BUDGET : null,
+        this.thinking ? 'summarized' : null,
+      );
+    } catch (error) {
+      // How the turn is displayed — never worth failing the prompt behind it.
+      console.error('[cockpit] thinking toggle failed:', (error as Error).message);
+    }
+  }
+
+  /**
+   * Send one prompt and resolve when that turn finishes. Thinking mode rides
+   * along on every prompt rather than on a channel of its own: the operator can
+   * flip it with no session open, or mid-turn, and either way the value that
+   * matters is the one in force when the next turn starts.
+   */
+  async send(prompt: string, thinking: boolean, sink: (event: AgentEvent) => void): Promise<void> {
     this.sink = sink;
+    const changed = thinking !== this.thinking;
+    this.thinking = thinking;
+    // A fresh query takes it as a spawn option; an open one has to be told.
     if (!this.query) await this.start();
+    else if (changed) await this.applyThinking();
 
     this.inbox.push({
       type: 'user',
@@ -480,11 +529,11 @@ function sessionFor(cwd: string): Session {
 }
 
 export async function runAgent(
-  req: { prompt: string; cwd: string },
+  req: { prompt: string; cwd: string; thinking: boolean },
   send: (event: AgentEvent) => void,
 ): Promise<void> {
   try {
-    await sessionFor(req.cwd).send(req.prompt, send);
+    await sessionFor(req.cwd).send(req.prompt, req.thinking, send);
   } catch (error) {
     send({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     send({ type: 'done' });

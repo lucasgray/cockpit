@@ -159,6 +159,34 @@ export class Store {
     this.writeMeta('openFiles', JSON.stringify(files));
   }
 
+  /**
+   * Which worktrees are in thinking mode. Per-worktree for the same reason
+   * sessions are: the composer speaks for the selected worktree, so dropping one
+   * into thinking mode leaves its siblings running as they were. Stored as a set
+   * of paths — absent means off, which is the default.
+   */
+  private thinkingCwds(): string[] {
+    const raw = this.readMeta('thinking');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  thinking(cwd: string): boolean {
+    return this.thinkingCwds().includes(cwd);
+  }
+
+  setThinking(cwd: string, on: boolean) {
+    const cwds = new Set(this.thinkingCwds());
+    if (on) cwds.add(cwd);
+    else cwds.delete(cwd);
+    this.writeMeta('thinking', JSON.stringify([...cwds]));
+  }
+
   // ---- worktree ports ----------------------------------------------------
 
   /**

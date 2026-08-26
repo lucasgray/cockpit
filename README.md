@@ -45,6 +45,18 @@ the default with `COCKPIT_PROJECT_ROOT=/path/to/repo npm run app`.
 > Worktrees only appear in the desktop app — the browser can't read git. The
 > in-browser `npm run dev` still works for everything else.
 
+### Thinking mode
+
+The **✳ Thinking** toggle in the composer (or **Tab**, as in Claude Code) drops
+the selected worktree into thinking mode. Off — the default — the model still
+reasons, but Claude Code omits the blocks, so all the cockpit can show is its
+spinner. On, thinking comes back summarized and streams into the transcript as
+`✳ thinking` bubbles above the answer.
+
+It's per-worktree, like the sessions themselves: one worktree can reason out loud
+while a sibling grinds. The setting sticks across restarts, and flipping it
+mid-turn lands on the next prompt rather than half-changing the one in flight.
+
 ## Architecture
 
 The UI is driven entirely by a **stream of `AgentEvent`s** — the mock and the

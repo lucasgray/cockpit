@@ -43,6 +43,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div class="composer">
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
+            <button id="thinking" class="btn toggle" aria-pressed="false">✳ Thinking</button>
             <div class="spacer"></div>
             <button id="stop" class="btn danger" hidden>■ Stop</button>
             <button id="send" class="btn primary">Send</button>
@@ -72,6 +73,7 @@ const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
+const thinkingBtn = document.getElementById('thinking') as HTMLButtonElement;
 const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 // The two rail views get their own containers rather than sharing one: the
 // worktree rail re-renders on a 1.5s poll while a turn runs, and that would
@@ -205,6 +207,7 @@ const rail = new WorktreeRail(
     cockpit.showPane(wt.path);
     cockpit.restorePane(wt.path);
     void setRunWorktree(wt);
+    void setThinkingWorktree(wt);
     void fileTree.setWorktree(wt);
     void restoreOpenFile(wt);
     // Send/Stop speak for the selected worktree — refresh them on every switch.
@@ -220,6 +223,7 @@ const rail = new WorktreeRail(
       cockpit.resetDiff();
       // The directory is gone; its run went with it in removeWorktree.
       void setRunWorktree(null);
+      void setThinkingWorktree(null);
       updateSendStop();
     }
     cockpit.dropPane(path);
@@ -365,6 +369,59 @@ function syncStatsPoll() {
   }
 }
 
+/**
+ * ✳ Thinking: drop the active worktree's session into thinking mode.
+ *
+ * Per-worktree, like the sessions themselves — one worktree can be reasoning out
+ * loud while a sibling grinds through a mechanical turn. Off is the quiet
+ * default the app has always had: the model still reasons, but Claude Code omits
+ * the blocks and the cockpit shows only its spinner. On asks for summarized
+ * thinking, and the reasoning streams into the transcript as ✳ thinking bubbles.
+ *
+ * The flag lives in the store, and the main process reads it there when a turn
+ * starts, so this only ever has to write it — flipping mid-turn lands on the
+ * next prompt rather than half-changing the one in flight.
+ */
+let thinkingOn = false;
+
+function paintThinking() {
+  thinkingBtn.classList.toggle('on', thinkingOn);
+  thinkingBtn.setAttribute('aria-pressed', String(thinkingOn));
+  thinkingBtn.disabled = !window.cockpit || !activeWorktree;
+  thinkingBtn.title = !window.cockpit
+    ? 'Thinking mode needs the desktop app'
+    : !activeWorktree
+      ? 'Select a worktree first'
+      : thinkingOn
+        ? `${activeWorktree.name} is thinking out loud — Tab to stop showing it`
+        : `Show ${activeWorktree.name}'s reasoning as it works — Tab`;
+}
+
+/** Adopt a worktree's thinking mode; it may have been left on last session. */
+async function setThinkingWorktree(wt: Worktree | null) {
+  thinkingOn = false;
+  paintThinking();
+  if (!window.cockpit || !wt) return;
+  const on = await window.cockpit.store.thinking(wt.path);
+  // The rail may have been clicked again while that was in flight.
+  if (activeWorktree?.path !== wt.path) return;
+  thinkingOn = on;
+  paintThinking();
+}
+
+function toggleThinking() {
+  const cwd = activeWorktree?.path;
+  if (!cwd || !window.cockpit) return;
+  thinkingOn = !thinkingOn;
+  paintThinking();
+  void window.cockpit.store.setThinking(cwd, thinkingOn);
+}
+
+thinkingBtn.addEventListener('click', toggleThinking);
+// Down here rather than beside the other init calls: those run before
+// `thinkingOn` is initialized, and reading it there is a startup crash.
+paintThinking();
+
 stopBtn.addEventListener('click', () => {
   if (activeWorktree && runningCwds.has(activeWorktree.path)) {
     window.cockpit?.agent.interrupt(activeWorktree.path);
@@ -433,5 +490,11 @@ promptInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendPrompt();
+  }
+  // Tab toggles thinking mode, as it does in Claude Code. Only from the prompt
+  // box — everywhere else Tab stays what it is, a way to move the focus.
+  if (e.key === 'Tab' && !e.shiftKey && !thinkingBtn.disabled) {
+    e.preventDefault();
+    toggleThinking();
   }
 });

@@ -60,6 +60,8 @@ const bridge: CockpitBridge = {
     openFile: (cwd: string) => ipcRenderer.invoke('store:openFile', cwd),
     setOpenFile: (cwd: string, path: string | null) =>
       ipcRenderer.invoke('store:setOpenFile', cwd, path),
+    thinking: (cwd: string) => ipcRenderer.invoke('store:thinking', cwd),
+    setThinking: (cwd: string, on: boolean) => ipcRenderer.invoke('store:setThinking', cwd, on),
     railView: () => ipcRenderer.invoke('store:railView'),
     setRailView: (view: string) => ipcRenderer.invoke('store:setRailView', view),
     settings: () => ipcRenderer.invoke('store:settings'),
