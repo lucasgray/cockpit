@@ -7,6 +7,13 @@ import { WorktreeRail } from './worktrees';
 import { IDLE_STATUS, type RunCommand, type RunStatus } from './runConfig';
 import { FileTree } from './fileTree';
 import { FileView } from './fileView';
+import {
+  MAX_IMAGES,
+  dragHasImages,
+  imageFilesFrom,
+  prepareImage,
+  type PastedImage,
+} from './images';
 import type { Worktree } from './bridge';
 import {
   FALLBACK_MODELS,
@@ -43,7 +50,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </aside>
       <section class="conversation">
         <div class="transcripts" id="conversation"></div>
-        <div class="composer">
+        <div class="composer" id="composer">
+          <div class="attachments" id="attachments" hidden></div>
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
             <button id="thinking" class="btn toggle" aria-pressed="false">✳ Thinking</button>
@@ -78,6 +86,8 @@ const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
+const composer = document.getElementById('composer') as HTMLElement;
+const attachmentTray = document.getElementById('attachments') as HTMLElement;
 const thinkingBtn = document.getElementById('thinking') as HTMLButtonElement;
 const modelPicker = document.getElementById('model') as HTMLSelectElement;
 const effortPicker = document.getElementById('effort') as HTMLSelectElement;
@@ -673,6 +683,112 @@ effortPicker.addEventListener('change', () => {
 paintPickers();
 void refreshModels();
 
+/**
+ * Screenshots waiting to go out with the next prompt.
+ *
+ * Composer state, on the same terms as the text in the box: shared by every
+ * worktree, kept across a switch, and let go the moment it's sent. It is not
+ * per-worktree like the switchers are, because it isn't a setting — it's half of
+ * a prompt somebody is in the middle of writing.
+ */
+let attachments: PastedImage[] = [];
+
+function paintAttachments() {
+  attachmentTray.replaceChildren();
+  attachmentTray.hidden = attachments.length === 0;
+
+  for (const image of attachments) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment';
+    chip.title = `${image.width}×${image.height} · ${Math.round(image.bytes / 1024)} KB`;
+
+    const thumb = document.createElement('img');
+    thumb.src = image.dataUrl;
+    thumb.alt = '';
+    chip.append(thumb);
+
+    const drop = document.createElement('button');
+    drop.className = 'attachment-drop';
+    drop.textContent = '×';
+    drop.title = 'Remove';
+    drop.addEventListener('click', () => {
+      attachments = attachments.filter((held) => held.id !== image.id);
+      paintAttachments();
+      promptInput.focus();
+    });
+    chip.append(drop);
+
+    attachmentTray.append(chip);
+  }
+}
+
+/**
+ * Take some images onto the composer, one at a time so each thumbnail appears as
+ * soon as it's ready rather than the whole batch at the end. A file that can't be
+ * read says so on the statusline and the rest still land — one bad paste is not a
+ * reason to lose the four screenshots beside it.
+ */
+async function attach(files: File[]) {
+  const room = MAX_IMAGES - attachments.length;
+  if (room <= 0) {
+    setStatusLine(`A prompt carries up to ${MAX_IMAGES} images — send these first.`);
+    return;
+  }
+  if (files.length > room) {
+    setStatusLine(`Only ${room} more image${room === 1 ? '' : 's'} fit on this prompt.`);
+  }
+  for (const file of files.slice(0, room)) {
+    try {
+      attachments.push(await prepareImage(file));
+      paintAttachments();
+    } catch (error) {
+      setStatusLine(`That image didn't come through — ${(error as Error).message}.`);
+    }
+  }
+}
+
+/**
+ * Whether a paste belongs to the composer. The prompt box always owns one; so
+ * does a paste with nothing focused, which is what ⌘⇧4 then ⌘V looks like when
+ * the window has just come forward. A paste aimed at any other editable — the
+ * file editor's Monaco textarea, the worktree rail's name field — is that
+ * surface's own, image or not.
+ */
+function composerOwnsPaste(target: EventTarget | null): boolean {
+  if (target === promptInput) return true;
+  if (!(target instanceof HTMLElement)) return true;
+  return !target.closest('input, textarea, [contenteditable="true"], .workspace');
+}
+
+document.addEventListener('paste', (event) => {
+  if (!composerOwnsPaste(event.target)) return;
+  const files = imageFilesFrom(event.clipboardData);
+  if (!files.length) return;
+  // Only images are claimed — a text paste is left to land wherever it was going.
+  event.preventDefault();
+  void attach(files);
+});
+
+// A file dropped on the window would otherwise navigate to it, replacing the app
+// with the image. Refuse everywhere, and take it in over the composer.
+document.addEventListener('dragover', (event) => event.preventDefault());
+document.addEventListener('drop', (event) => event.preventDefault());
+
+composer.addEventListener('dragover', (event) => {
+  if (dragHasImages(event.dataTransfer)) composer.classList.add('dropping');
+});
+composer.addEventListener('dragleave', (event) => {
+  // Crossing onto a child fires dragleave on the parent; only a real exit counts.
+  if (!composer.contains(event.relatedTarget as Node | null)) {
+    composer.classList.remove('dropping');
+  }
+});
+composer.addEventListener('drop', (event) => {
+  composer.classList.remove('dropping');
+  const files = imageFilesFrom(event.dataTransfer);
+  if (files.length) void attach(files);
+});
+
 stopBtn.addEventListener('click', () => {
   if (activeWorktree && runningCwds.has(activeWorktree.path)) {
     window.cockpit?.agent.interrupt(activeWorktree.path);
@@ -681,7 +797,9 @@ stopBtn.addEventListener('click', () => {
 
 async function sendPrompt() {
   const prompt = promptInput.value.trim();
-  if (!prompt) return;
+  // A screenshot with nothing typed is a prompt in its own right — "look at
+  // this" — so either half is enough to send on.
+  if (!prompt && !attachments.length) return;
 
   // Turns run against a worktree through the main process — in the browser there
   // is no bridge and nothing to run against.
@@ -703,12 +821,17 @@ async function sendPrompt() {
   promptInput.value = '';
   drafts.set(cwd, '');
   saveDraft(cwd);
+  // Handed to this turn, so a paste during it starts the next prompt's tray
+  // rather than joining one already in flight.
+  const images = attachments;
+  attachments = [];
+  paintAttachments();
   runningCwds.add(cwd);
   rail.setRunning(cwd, true);
   updateSendStop();
   syncStatsPoll();
   try {
-    await runStream(cockpit, electronSource({ prompt, cwd }), { key: cwd, reset: false });
+    await runStream(cockpit, electronSource({ prompt, cwd, images }), { key: cwd, reset: false });
   } finally {
     runningCwds.delete(cwd);
     rail.setRunning(cwd, false);

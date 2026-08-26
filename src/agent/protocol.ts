@@ -1,5 +1,26 @@
 export type Snippet = { lang: string; code: string };
 
+/** The image types the Messages API takes. A paste of anything else is refused. */
+export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+
+export type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number];
+
+/** One pasted screenshot on its way to Claude. Base64, with no `data:` prefix. */
+export type OutboundImage = { mediaType: ImageMediaType; data: string };
+
+/**
+ * A screenshot as the transcript draws it, in the two forms one can be in.
+ *
+ * `inline` is the live turn: the renderer already holds the bytes it just pasted,
+ * so the bubble draws from them directly. `stored` is history: the main process
+ * wrote the image to a file beside its database and the event names it, because a
+ * megabyte of base64 per screenshot in the transcript would be read back in full
+ * every time the worktree is opened. See electron/images.ts.
+ */
+export type TranscriptImage =
+  | { kind: 'inline'; mediaType: ImageMediaType; dataUrl: string }
+  | { kind: 'stored'; mediaType: ImageMediaType; file: string };
+
 export type EditOp =
   | { kind: 'insertAfter'; anchor: string; text: string; note?: string }
   | { kind: 'replaceLine'; anchor: string; text: string; note?: string }
@@ -24,7 +45,8 @@ export type QuestionSpec = {
 };
 
 export type AgentEvent =
-  | { type: 'user'; text: string }
+  // `text` may be empty when the operator sent nothing but screenshots.
+  | { type: 'user'; text: string; images?: TranscriptImage[] }
   | { type: 'thinking'; text: string }
   | { type: 'say'; text: string }
   | { type: 'plan'; title: string; items: PlanItem[] }
