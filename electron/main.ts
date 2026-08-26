@@ -24,6 +24,7 @@ import {
   startRun,
   stopRun,
 } from './runner';
+import { openPr, prStatus } from './pr';
 import { ensurePort } from './ports';
 import { getStore, openStore } from './store';
 import type { CockpitSettings, EffortChoice } from '../src/settings';
@@ -306,6 +307,8 @@ async function removeWorktree(cwd: string): Promise<WorktreeRemoveResult> {
   }
 
   getStore().clearTranscript(cwd);
+  // The remembered PR pointed at this branch; the branch is gone, so forget it.
+  getStore().setPr(cwd, null);
   void dropImages(cwd);
   // The port goes back in the pool — otherwise a long-lived cockpit would walk
   // its assignments upward forever as worktrees come and go.
@@ -380,6 +383,23 @@ app.whenReady().then(() => {
   ipcMain.handle('worktrees:create', (_event, branch: string) => createWorktree(branch));
   ipcMain.handle('worktrees:diff', (_event, cwd: string) => worktreeDiff(cwd));
   ipcMain.handle('worktrees:remove', (_event, cwd: string) => removeWorktree(cwd));
+  ipcMain.handle('pr:status', async (_event, cwd: string) => {
+    // Live gh is the source of truth; the remembered PR is the fallback when it
+    // can't answer, so a known PR still labels the button offline.
+    const live = await prStatus(cwd);
+    if (live) {
+      getStore().setPr(cwd, { number: live.number, url: live.url });
+      return live;
+    }
+    return getStore().pr(cwd);
+  });
+  ipcMain.handle('pr:open', async (_event, cwd: string) => {
+    const result = await openPr(cwd);
+    if (result.ok && result.pr) {
+      getStore().setPr(cwd, { number: result.pr.number, url: result.pr.url });
+    }
+    return result;
+  });
   ipcMain.handle(
     'agent:run',
     async (

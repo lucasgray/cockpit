@@ -42,6 +42,22 @@ export type WorktreeRemoveResult = {
   error?: string;
 };
 
+/** An open pull request for a worktree's branch, as GitHub knows it. */
+export type PrInfo = {
+  number: number;
+  url: string;
+  /** GitHub's state — only `OPEN` PRs are ones the button offers to update. */
+  state?: string;
+};
+
+export type PrResult = {
+  ok: boolean;
+  pr?: PrInfo;
+  /** True when this call created the PR, false when it updated an existing one. */
+  created?: boolean;
+  error?: string;
+};
+
 /** How a worktree's create hook finished. Arrives well after `create` resolves. */
 export type WorktreeHookResult = {
   cwd: string;
@@ -93,6 +109,24 @@ export type CockpitBridge = {
     remove: (cwd: string) => Promise<WorktreeRemoveResult>;
     /** Subscribe to create-hook completions. Returns an unsubscribe function. */
     onHook: (listener: (result: WorktreeHookResult) => void) => () => void;
+  };
+  /**
+   * Getting a worktree's branch onto GitHub as a pull request. Both calls act on
+   * the branch the worktree currently has checked out.
+   */
+  pr: {
+    /**
+     * The open PR for this worktree's branch, or null if there isn't one yet —
+     * what the button reads to show "Open PR" versus "Update PR #N". A live
+     * `gh pr view`, falling back to what was last remembered when gh can't answer.
+     */
+    status: (cwd: string) => Promise<PrInfo | null>;
+    /**
+     * Push the branch and, if no PR exists, create one from its commits. Never
+     * force-pushes — a rejected push is surfaced, not overridden. Pushing when a
+     * PR is already open is how it updates.
+     */
+    open: (cwd: string) => Promise<PrResult>;
   };
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;

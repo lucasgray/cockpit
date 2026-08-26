@@ -542,40 +542,137 @@ body {
   color: #e07b86;
 }
 
-/* Sits directly under the dot. Stays out of the way until the row is hovered
-   or already being acted on. */
-.wt-remove {
+/* Sits directly under the dot. Always drawn — unlike the old hover-revealed ✕ —
+   so a row's actions are discoverable and keyboard-reachable; only its ink lifts
+   on hover or while its drawer is open. */
+.wt-menu {
   flex: none;
   font: inherit;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1;
   color: var(--dim-2);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
-  padding: 3px 4px;
+  padding: 1px 4px;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 
-.wt-row:hover .wt-remove,
-.wt-row.confirming .wt-remove,
-.wt-remove:focus-visible {
-  opacity: 1;
+.wt-row:hover .wt-menu,
+.wt-menu:focus-visible {
+  color: var(--dim);
 }
 
-.wt-remove:hover {
+.wt-row.open .wt-menu {
+  color: var(--text);
+  border-color: var(--border-2);
+}
+
+/* Lifts the row while its drawer is out, without borrowing selection's accent
+   border — opening a drawer isn't selecting the row. */
+.wt-row.open {
+  background: var(--panel-2);
+}
+
+/* Unfolds under the row: full width in the wrapping flex row, a stacked column
+   of actions. Natural height by default so a repaint (PR status landing, the
+   confirm swapping in) can't collapse it — only `.opening` animates, and it's
+   set for just the render that opens the drawer. */
+.wt-drawer {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 10px 8px;
+}
+
+.wt-drawer.opening {
+  overflow: hidden;
+  animation: wt-unfold 0.16s ease-out;
+}
+
+@keyframes wt-unfold {
+  from {
+    max-height: 0;
+    opacity: 0;
+  }
+  to {
+    max-height: 220px;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wt-drawer.opening {
+    animation: none;
+  }
+}
+
+/* One full-width action inside the drawer — Open/Update PR, Remove worktree. */
+.wt-drawer-btn {
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  padding: 6px 9px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.wt-drawer-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.wt-drawer-btn:disabled {
+  color: var(--dim);
+  cursor: default;
+}
+
+.wt-drawer-remove:hover:not(:disabled) {
   color: var(--danger);
   border-color: var(--danger);
 }
 
+/* The PR button carries the drawer's width; its "#N ↗" link floats off the end. */
+.wt-pr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wt-pr-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.wt-pr-link {
+  flex: none;
+  font-size: 11px;
+  color: var(--dim);
+  text-decoration: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.wt-pr-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.wt-drawer-error {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
 .wt-confirm {
-  flex: 0 0 100%;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 8px 6px 10px;
 }
 
 .wt-confirm-note {
