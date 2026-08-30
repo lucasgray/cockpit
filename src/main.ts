@@ -1,6 +1,6 @@
 import './style.css';
-import { registerCockpitTheme } from './theme';
-import { monaco } from './monaco-env';
+import { registerCockpitTheme, applyHighlightColor } from './theme';
+import { highlightColorHex } from './highlightColors';
 import { Cockpit, runStream } from './cockpit';
 import { electronSource } from './agent/electronSource';
 import { WorktreeRail } from './worktrees';
@@ -24,7 +24,15 @@ import {
 } from './settings';
 
 registerCockpitTheme();
-monaco.editor.setTheme('cockpit-dark');
+
+// The stored highlight color wins over the default the moment it's known, and
+// the app menu (View → Highlight Color) can push a new one at any time after.
+void window.cockpit?.store.settings().then((settings) => {
+  applyHighlightColor(highlightColorHex(settings.highlightColor));
+});
+window.cockpit?.store.onHighlightColorChange((id) => {
+  applyHighlightColor(highlightColorHex(id));
+});
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <div class="app">

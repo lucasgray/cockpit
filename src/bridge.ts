@@ -219,6 +219,12 @@ export type CockpitBridge = {
     setRailView: (view: string) => Promise<void>;
     settings: () => Promise<CockpitSettings>;
     saveSettings: (patch: Partial<CockpitSettings>) => Promise<CockpitSettings>;
+    /**
+     * The highlight color changed from the app menu (View → Highlight Color).
+     * The menu lives in the main process, so this is how the renderer finds out
+     * without polling — the same push pattern `worktrees.onHook` uses.
+     */
+    onHighlightColorChange: (listener: (id: string) => void) => () => void;
   };
 };
 

@@ -80,6 +80,11 @@ const bridge: CockpitBridge = {
     settings: () => ipcRenderer.invoke('store:settings'),
     saveSettings: (patch: Partial<CockpitSettings>) =>
       ipcRenderer.invoke('store:saveSettings', patch),
+    onHighlightColorChange: (listener: (id: string) => void) => {
+      const wrapped = (_e: unknown, id: string) => listener(id);
+      ipcRenderer.on('settings:highlightColor', wrapped);
+      return () => ipcRenderer.removeListener('settings:highlightColor', wrapped);
+    },
   },
 };
 

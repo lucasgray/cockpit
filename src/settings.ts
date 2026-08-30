@@ -9,6 +9,7 @@
  */
 
 import { DEFAULT_PORT } from './port';
+import { DEFAULT_HIGHLIGHT_COLOR, isHighlightColorId } from './highlightColors';
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'dontAsk';
 
@@ -189,6 +190,12 @@ export type CockpitSettings = {
    * from here, so two worktrees can serve at the same time without colliding.
    */
   portBase: number;
+  /**
+   * The app's accent color — id from `HIGHLIGHT_COLORS`, set from the app menu
+   * (View → Highlight Color). Stored as an id rather than a hex so a future
+   * change to the palette's shades doesn't strand old settings rows.
+   */
+  highlightColor: string;
 };
 
 export const DEFAULT_SETTINGS: CockpitSettings = {
@@ -201,6 +208,7 @@ export const DEFAULT_SETTINGS: CockpitSettings = {
   runCommand: '',
   worktreeCreateHook: '',
   portBase: DEFAULT_PORT,
+  highlightColor: DEFAULT_HIGHLIGHT_COLOR,
 };
 
 function str(value: unknown, fallback: string): string {
@@ -227,5 +235,8 @@ export function normalizeSettings(raw: unknown): CockpitSettings {
     worktreeCreateHook: str(input.worktreeCreateHook, DEFAULT_SETTINGS.worktreeCreateHook).trim(),
     // Below 1024 needs root to bind, and the range has to leave room to count up.
     portBase: Number.isFinite(base) ? Math.min(60_000, Math.max(1_024, Math.round(base))) : DEFAULT_PORT,
+    highlightColor: isHighlightColorId(input.highlightColor)
+      ? input.highlightColor
+      : DEFAULT_SETTINGS.highlightColor,
   };
 }

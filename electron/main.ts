@@ -26,6 +26,7 @@ import {
 } from './runner';
 import { openPr, prStatus } from './pr';
 import { ensurePort } from './ports';
+import { buildMenu } from './menu';
 import { getStore, openStore } from './store';
 import type { CockpitSettings, EffortChoice } from '../src/settings';
 import { resolvePort } from '../src/port';
@@ -367,6 +368,7 @@ app.whenReady().then(() => {
   // The app's own state lives beside the app, never in the repo being worked on.
   openStore(app.getPath('userData'));
   openImageStore(app.getPath('userData'));
+  buildMenu();
 
   // `cockpit-image://image/<worktree>/<name>` — a fixed host, and a path that is
   // the file's own name inside the store. Nothing outside it can be reached.
