@@ -32,7 +32,7 @@ const THINKING_BUDGET = 16_000;
 type AgentSdk = typeof import('@anthropic-ai/claude-agent-sdk');
 const importEsm = new Function('m', 'return import(m)') as (m: string) => Promise<AgentSdk>;
 let sdkPromise: Promise<AgentSdk> | null = null;
-function loadSdk(): Promise<AgentSdk> {
+export function loadSdk(): Promise<AgentSdk> {
   sdkPromise ??= importEsm('@anthropic-ai/claude-agent-sdk');
   return sdkPromise;
 }
