@@ -33,7 +33,7 @@ import { resolvePort } from '../src/port';
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT =
-  process.env.COCKPIT_PROJECT_ROOT || '/Users/lucas-comp/projects/agent-cockpit';
+  process.env.COCKPIT_PROJECT_ROOT || '/Users/lucas-play/Documents/projects/cockpit';
 
 /**
  * How a transcript names a screenshot it is holding.
