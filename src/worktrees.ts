@@ -237,31 +237,23 @@ export class WorktreeRail {
     slot.append(dot);
     col.append(slot);
 
-    // The main checkout is where the branches land — nothing in the drawer (open
-    // a PR, remove the worktree) applies to it, so it gets no ⋯ at all.
-    if (!wt.isMain) {
-      const menu = document.createElement('button');
-      menu.className = 'wt-menu';
-      menu.textContent = '⋯';
-      menu.title = 'Worktree actions';
-      menu.setAttribute('aria-expanded', String(wt.path === this.openPath));
-      menu.addEventListener('click', (e) => {
-        // The document click-off handler ignores clicks on a row, so the toggle
-        // owns open and close: this stops that handler from firing at all.
-        e.stopPropagation();
-        const opening = this.openPath !== wt.path;
-        this.openPath = opening ? wt.path : null;
-        this.confirmPath = null;
-        this.prError = null;
-        this.error = null;
-        this.drawerOpening = opening;
-        this.render();
-        // Opening reveals whether a PR already exists, without blocking the
-        // unfold on the network round-trip.
-        if (opening) void this.loadPrStatus(wt);
-      });
-      col.append(menu);
-    }
+    const menu = document.createElement('button');
+    menu.className = 'wt-menu';
+    menu.textContent = '⋯';
+    menu.title = 'Worktree actions';
+    menu.setAttribute('aria-expanded', String(wt.path === this.openPath));
+    menu.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const opening = this.openPath !== wt.path;
+      this.openPath = opening ? wt.path : null;
+      this.confirmPath = null;
+      this.prError = null;
+      this.error = null;
+      this.drawerOpening = opening;
+      this.render();
+      if (opening) void this.loadPrStatus(wt);
+    });
+    col.append(menu);
     return col;
   }
 
@@ -285,16 +277,18 @@ export class WorktreeRail {
 
     drawer.append(this.prControl(wt));
 
-    const remove = document.createElement('button');
-    remove.className = 'wt-drawer-btn wt-drawer-remove';
-    remove.textContent = '✕ Remove worktree';
-    remove.title = `Removes the worktree and deletes branch ${wt.branch}`;
-    remove.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.confirmPath = wt.path;
-      this.render();
-    });
-    drawer.append(remove);
+    if (!wt.isMain) {
+      const remove = document.createElement('button');
+      remove.className = 'wt-drawer-btn wt-drawer-remove';
+      remove.textContent = '✕ Remove worktree';
+      remove.title = `Removes the worktree and deletes branch ${wt.branch}`;
+      remove.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.confirmPath = wt.path;
+        this.render();
+      });
+      drawer.append(remove);
+    }
 
     if (this.prError?.path === wt.path) {
       const err = document.createElement('div');

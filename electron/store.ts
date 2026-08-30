@@ -252,21 +252,32 @@ export class Store {
    * back to the cockpit's own settings, and past that to whatever the CLI does
    * on its own.
    */
+  private static DEFAULT_MODEL = 'claude-opus-4-8[1m]';
+  private static DEFAULT_EFFORT: EffortLevel = 'high';
+
   model(cwd: string): string {
-    return this.record('agentModel')[cwd] ?? '';
+    return this.record('agentModel')[cwd]
+      || this.readMeta('lastModel')
+      || Store.DEFAULT_MODEL;
   }
 
   setModel(cwd: string, model: string) {
-    this.setRecordValue('agentModel', cwd, model);
+    this.setRecordValue('agentModel', cwd, model || Store.DEFAULT_MODEL);
+    this.writeMeta('lastModel', model || Store.DEFAULT_MODEL);
   }
 
   effort(cwd: string): EffortChoice {
     const stored = this.record('agentEffort')[cwd];
-    return EFFORT_LEVELS.includes(stored as EffortLevel) ? (stored as EffortLevel) : '';
+    if (EFFORT_LEVELS.includes(stored as EffortLevel)) return stored as EffortLevel;
+    const last = this.readMeta('lastEffort');
+    if (EFFORT_LEVELS.includes(last as EffortLevel)) return last as EffortLevel;
+    return Store.DEFAULT_EFFORT;
   }
 
   setEffort(cwd: string, effort: EffortChoice) {
-    this.setRecordValue('agentEffort', cwd, effort);
+    const value = effort || Store.DEFAULT_EFFORT;
+    this.setRecordValue('agentEffort', cwd, value);
+    this.writeMeta('lastEffort', value);
   }
 
   /**
