@@ -1,13 +1,14 @@
 import { monaco } from './monaco-env';
+import { highlightColorHex, softVariant, DEFAULT_HIGHLIGHT_COLOR } from './highlightColors';
 
-export function registerCockpitTheme() {
+function defineTheme(accent: string) {
   monaco.editor.defineTheme('cockpit-dark', {
     base: 'vs-dark',
     inherit: true,
     rules: [
       { token: '', foreground: 'c5cad6' },
       { token: 'comment', foreground: '5b6273', fontStyle: 'italic' },
-      { token: 'keyword', foreground: 'c58fe0', fontStyle: 'italic' },
+      { token: 'keyword', foreground: accent, fontStyle: 'italic' },
       { token: 'number', foreground: '9aa4ef' },
       { token: 'string', foreground: '9cc77e' },
       { token: 'string.escape', foreground: '9cc77e' },
@@ -21,7 +22,7 @@ export function registerCockpitTheme() {
       'editor.background': '#181b23',
       'editor.foreground': '#c5cad6',
       'editorLineNumber.foreground': '#454b5c',
-      'editorLineNumber.activeForeground': '#c58fe0',
+      'editorLineNumber.activeForeground': `#${accent}`,
       'editor.selectionBackground': '#2a2f42',
       'editor.lineHighlightBackground': '#1e222c',
       'editorGutter.background': '#181b23',
@@ -35,4 +36,21 @@ export function registerCockpitTheme() {
       'editorOverviewRuler.border': '#00000000',
     },
   });
+}
+
+export function registerCockpitTheme() {
+  defineTheme(highlightColorHex(DEFAULT_HIGHLIGHT_COLOR).slice(1));
+  monaco.editor.setTheme('cockpit-dark');
+}
+
+/**
+ * Applies a highlight color chosen from the app menu everywhere it's used: the
+ * CSS accent variables the rest of the UI reads, and the editor's keyword and
+ * active-line-number colors, which have always tracked the same accent.
+ */
+export function applyHighlightColor(hex: string) {
+  document.documentElement.style.setProperty('--accent', hex);
+  document.documentElement.style.setProperty('--accent-soft', softVariant(hex));
+  defineTheme(hex.replace('#', ''));
+  monaco.editor.setTheme('cockpit-dark');
 }
