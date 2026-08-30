@@ -13,6 +13,10 @@ import type {
 const sleep = (ms: number) =>
   document.hidden ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Tools whose row names a file — clicking one opens it in the File pane
+ *  instead of expanding its (mostly unhelpful) raw detail in place. */
+const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit']);
+
 /**
  * Typewriter pacing. One tick is roughly one frame; the chunk size — how many
  * characters land per tick — scales up so a big edit still finishes on time.
@@ -93,7 +97,11 @@ export class Cockpit {
   /** Whether the current edit was too big to type, for the status line. */
   private appliedWhole = false;
 
-  constructor() {
+  /** A Read/Edit/Write/MultiEdit row was clicked — open that file in the File pane. */
+  private onOpenFile: (cwd: string, path: string) => void;
+
+  constructor(onOpenFile: (cwd: string, path: string) => void) {
+    this.onOpenFile = onOpenFile;
     this.conversations = document.getElementById('conversation')!;
     this.status = document.getElementById('status')!;
     const diffContainer = document.getElementById('diff')!;
@@ -459,6 +467,11 @@ export class Cockpit {
     const isSubagent = name === 'Task' || name === 'Agent';
     const row = this.addMessage('tool running');
     if (isSubagent) row.classList.add('subagent');
+    // The file itself, not its raw tool output, is what's useful to look at —
+    // route the click to the File pane instead of the usual expand-in-place.
+    const filePath = FILE_TOOLS.has(name) ? summary : '';
+    const cwd = this.pane.key;
+    if (filePath) row.classList.add('openable');
 
     const head = document.createElement('div');
     head.className = 'tool-head';
@@ -467,6 +480,7 @@ export class Cockpit {
       '<span class="tool-summary"></span><span class="tool-steps"></span><span class="tool-caret"></span>';
     head.querySelector('.tool-name')!.textContent = isSubagent ? 'Subagent' : name;
     head.querySelector('.tool-summary')!.textContent = summary;
+    if (filePath) head.title = 'Open in File pane';
 
     const body = document.createElement('div');
     body.className = 'tool-body';
@@ -480,6 +494,10 @@ export class Cockpit {
     row.append(head, body);
     // The whole head toggles the body — but only once there's something in it.
     head.addEventListener('click', () => {
+      if (filePath) {
+        this.onOpenFile(cwd, filePath);
+        return;
+      }
       if (body.childElementCount > 0) row.classList.toggle('expanded');
     });
     this.syncToolBody(row);
@@ -514,7 +532,9 @@ export class Cockpit {
       this.paintSubagent(id, true);
       this.pane.subagents.delete(id);
     }
-    if (detail) {
+    // An openable row's click opens the file, not the raw result — skip
+    // building an expandable body it can never be clicked open to reveal.
+    if (detail && !row.classList.contains('openable')) {
       const out = document.createElement('pre');
       out.className = 'tool-out';
       out.textContent = detail;

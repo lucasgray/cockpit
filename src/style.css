@@ -1086,6 +1086,12 @@ body {
   cursor: pointer;
 }
 
+/* Read/Edit/Write/MultiEdit rows open the file instead of expanding — same
+   affordance as an expandable row, no caret since there's nothing to unfold. */
+.tool.openable .tool-head {
+  cursor: pointer;
+}
+
 .tool-glyph::before {
   content: '•';
   color: var(--dim-2);
