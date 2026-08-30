@@ -81,7 +81,12 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   </div>
 `;
 
-const cockpit = new Cockpit();
+// Clicking a Read/Edit/Write/MultiEdit row in the transcript opens that file
+// in the File pane rather than expanding its raw detail in place.
+const cockpit = new Cockpit((cwd, path) => {
+  setWorkspaceView('file');
+  void fileView.open(cwd, path);
+});
 const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
