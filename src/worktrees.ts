@@ -31,6 +31,23 @@ function statHtml(wt: Worktree): string {
 /** Length of one pulse cycle — keep in sync with `wt-pulse` in style.css. */
 const PULSE_MS = 1200;
 
+/**
+ * The git-branch glyph that sits in front of each worktree's branch name — the
+ * familiar fork of two commit dots joined by a line. Inline SVG rather than a
+ * font glyph so it inherits `currentColor` and lines up on the branch baseline
+ * at any size.
+ */
+const branchIcon =
+  '<svg class="wt-branch-icon" viewBox="0 0 16 16" width="12" height="12" ' +
+  'fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<circle cx="4.5" cy="3.5" r="1.75"/>' +
+  '<circle cx="4.5" cy="12.5" r="1.75"/>' +
+  '<circle cx="11.5" cy="3.5" r="1.75"/>' +
+  '<path d="M4.5 5.25v5.5"/>' +
+  '<path d="M11.5 5.25v1.5a3.5 3.5 0 0 1-3.5 3.5H6.25"/>' +
+  '</svg>';
+
 export class WorktreeRail {
   private container: HTMLElement;
   private onSelect: (wt: Worktree) => void;
@@ -197,7 +214,7 @@ export class WorktreeRail {
         ${statHtml(wt)}
       </div>
       <div class="wt-bottom">
-        <span class="wt-branch">${wt.branch}</span>
+        <span class="wt-branch">${branchIcon}<span class="wt-branch-name">${wt.branch}</span></span>
       </div>`;
     item.addEventListener('click', () => {
       // Selecting any row closes an open drawer — the drawer is per-row, and the

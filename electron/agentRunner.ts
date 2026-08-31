@@ -377,6 +377,7 @@ class Session {
   }
 
   private async start() {
+    console.log('[cockpit] starting new session for', this.cwd);
     const { query, tool, createSdkMcpServer } = await loadSdk();
 
     // The built-in AskUserQuestion can't be answered from an SDK host — it just
@@ -476,8 +477,8 @@ class Session {
           const content = msg.message?.content;
           const detail = Array.isArray(content)
             ? content
-                .filter((b): b is { type: 'text'; text: string } => (b as { type: string }).type === 'text')
-                .map((b) => b.text)
+                .map((b) => (b.type === 'text' ? b.text : ''))
+                .filter(Boolean)
                 .join(' ')
             : '';
           this.emit({ type: 'error', message: detail || `Claude: ${msg.error}` });
@@ -524,6 +525,7 @@ class Session {
       }
 
       if (msg.type === 'result') {
+        console.log('[cockpit] result:', JSON.stringify({ subtype: msg.subtype, cwd: this.cwd }));
         if (msg.subtype !== 'success') {
           this.emit({ type: 'error', message: `Run ended: ${msg.subtype}` });
         }

@@ -479,6 +479,14 @@ void window.cockpit?.store.railView().then((view) => {
 });
 updateSendStop();
 
+// A branch name can change out from under us — a commit lands, the agent
+// checks out a new branch, or the user does it from a terminal — with no event
+// to announce it. The stats poll below only runs while a turn is in flight, so
+// keep a slow steady poll going so the rail's branch names stay current even
+// when everything is idle. refresh() no-ops mid-interaction and keeps the last
+// good list on error, so this is safe to leave ticking.
+window.setInterval(() => void rail.refresh(), 5000);
+
 /** Worktrees with a turn in flight. Runs are per-worktree and concurrent. */
 const runningCwds = new Set<string>();
 /** Interval repainting the rail's +/- + dirty dots while any run is going. */

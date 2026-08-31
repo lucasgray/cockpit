@@ -500,9 +500,23 @@ body {
 }
 
 .wt-branch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
   font-size: 11px;
   color: var(--dim);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.wt-branch-icon {
+  flex: none;
+  /* Nudged onto the text's optical centre rather than its box centre. */
+  margin-top: 0.5px;
+  opacity: 0.85;
+}
+
+.wt-branch-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
