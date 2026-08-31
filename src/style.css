@@ -145,6 +145,13 @@ body {
   color: var(--accent);
 }
 
+.btn.stop {
+  border-color: var(--danger);
+  color: var(--danger);
+  min-width: 0;
+  padding: 7px 12px;
+}
+
 .btn.danger:hover:not(:disabled) {
   border-color: var(--danger);
   color: var(--danger);
@@ -180,57 +187,36 @@ body {
   cursor: default;
 }
 
-/* The composer's model and effort switchers. Same chassis as .btn.toggle — a
-   control that holds a state rather than firing an action — but a menu, so the
-   native chrome comes off and it wears a caret of its own. Dim while it sits on
-   the default; lit once the worktree is pinned to something. */
-.picker {
-  font: inherit;
+/* The composer's ✳/model/effort summary — one compact control standing in for
+   what used to be three, so it never wraps Send onto its own line. Each part
+   dims until it's actually set, the way the old toggle and pickers did; the
+   full sentence behind an abbreviation like "Hi" lives in the title, and a
+   click opens .agent-menu to change any of it. */
+.agent-settings {
   font-size: 12px;
   color: var(--dim);
-  background: transparent;
-  border: 1px solid var(--border-2);
-  border-radius: 8px;
-  padding: 7px 24px 7px 10px;
-  cursor: pointer;
-  appearance: none;
-  /* A select is as wide as its widest option, and model names are long — left
-     alone, one "Claude Sonnet 4.5 (fast)" pushes Send off the end of a narrow
-     conversation column. Cap it and let the label ellipsize instead; the open
-     menu still shows every name in full. */
-  min-width: 0;
-  max-width: 150px;
-  text-overflow: ellipsis;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%237f8797' stroke-width='1.5' stroke-linecap='round'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  /* The SVG carries a viewBox and no width/height, so it has no intrinsic size:
-     without this it scales to the whole control and the caret swallows the box. */
-  background-size: 10px 6px;
-  transition: border-color 0.15s, color 0.15s, background-color 0.15s;
+  padding: 7px 10px;
 }
 
-.picker:hover:not(:disabled) {
-  border-color: var(--accent);
+.agent-seg {
+  color: var(--dim);
+}
+
+.agent-seg.active {
   color: var(--accent);
 }
 
-.picker.set {
-  border-color: var(--accent);
-  color: var(--accent);
-  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+/* The dropdown behind .agent-settings — same chassis as the file tab menus. */
+.agent-menu {
+  min-width: 200px;
 }
 
-.picker:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* The dropdown itself is drawn by the OS — give it the panel's colors so it
-   doesn't open as a white sheet over a dark app. */
-.picker option {
-  background: var(--panel-2);
-  color: var(--text);
+.agent-menu-label {
+  padding: 6px 8px 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dim-2);
 }
 
 .body {
@@ -793,9 +779,10 @@ body {
   gap: 8px;
 }
 
-/* Five controls on one line in a column that can be dragged narrow. Let the row
-   wrap rather than clip: a Send button pushed off the right edge is unreachable,
-   where a Send button on a second line is merely lower down. */
+/* The ✳/model/effort summary, Stop and Send share this line in a column that
+   can be dragged narrow. Let the row wrap rather than clip: a Send button
+   pushed off the right edge is unreachable, where one on a second line is
+   merely lower down. */
 .composer-actions {
   display: flex;
   align-items: center;

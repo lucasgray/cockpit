@@ -1,5 +1,5 @@
 /**
- * The 20 highlight colors offered from the app menu (View → Highlight Color).
+ * The 21 highlight colors offered from the app menu (View → Highlight Color).
  * Each is just an accent hex — everything that reads `--accent` (borders,
  * active tabs, focus rings, the editor's keyword color) follows whichever one
  * is picked. `pink` is the default, matched to macOS's own Pink highlight
@@ -29,6 +29,7 @@ export const HIGHLIGHT_COLORS: HighlightColor[] = [
   { id: 'lavender', label: 'Lavender', hex: '#c58fe0' },
   { id: 'purple', label: 'Purple', hex: '#b46fe0' },
   { id: 'violet', label: 'Violet', hex: '#a05fe8' },
+  { id: 'macpink', label: 'Mac Pink', hex: '#f74f9e' },
   { id: 'magenta', label: 'Magenta', hex: '#e070c8' },
   { id: 'rose', label: 'Rose', hex: '#e88fa8' },
   { id: 'graphite', label: 'Graphite', hex: '#a3abbf' },

@@ -20,6 +20,7 @@ import {
   FALLBACK_MODELS,
   UNLISTED_MODELS,
   type EffortChoice,
+  type EffortLevel,
   type ModelChoice,
 } from './settings';
 
@@ -64,10 +65,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
             <button id="thinking" class="btn toggle" aria-pressed="false">✳ Thinking</button>
-            <select id="model" class="picker" aria-label="Model"></select>
-            <select id="effort" class="picker" aria-label="Effort"></select>
+            <button
+              id="agent-settings"
+              class="btn toggle agent-settings"
+              aria-haspopup="true"
+              aria-expanded="false"
+            ></button>
             <div class="spacer"></div>
-            <button id="stop" class="btn danger" hidden>■ Stop</button>
             <button id="send" class="btn primary">Send</button>
           </div>
         </div>
@@ -97,13 +101,11 @@ const cockpit = new Cockpit((cwd, path) => {
 });
 const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
-const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
 const composer = document.getElementById('composer') as HTMLElement;
 const attachmentTray = document.getElementById('attachments') as HTMLElement;
 const thinkingBtn = document.getElementById('thinking') as HTMLButtonElement;
-const modelPicker = document.getElementById('model') as HTMLSelectElement;
-const effortPicker = document.getElementById('effort') as HTMLSelectElement;
+const agentSettingsBtn = document.getElementById('agent-settings') as HTMLButtonElement;
 const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 // The two rail views get their own containers rather than sharing one: the
 // worktree rail re-renders on a 1.5s poll while a turn runs, and that would
@@ -491,9 +493,10 @@ let statsPoll = 0;
 function updateSendStop() {
   if (!window.cockpit?.agent) return;
   const busy = !!activeWorktree && runningCwds.has(activeWorktree.path);
-  sendBtn.disabled = busy || !activeWorktree;
-  sendBtn.textContent = busy ? '● working…' : 'Send';
-  stopBtn.hidden = !busy;
+  sendBtn.disabled = !activeWorktree;
+  sendBtn.textContent = busy ? '■' : 'Send';
+  sendBtn.classList.toggle('primary', !busy);
+  sendBtn.classList.toggle('stop', busy);
 }
 
 /**
@@ -538,8 +541,8 @@ function paintThinking() {
     : !activeWorktree
       ? 'Select a worktree first'
       : thinkingOn
-        ? `${activeWorktree.name} is thinking out loud — Tab to stop showing it`
-        : `Show ${activeWorktree.name}'s reasoning as it works — Tab`;
+        ? `${activeWorktree.name} is thinking out loud — Tab to stop`
+        : `Show ${activeWorktree.name}'s reasoning — Tab`;
 }
 
 /** Adopt a worktree's thinking mode; it may have been left on last session. */
@@ -548,7 +551,6 @@ async function setThinkingWorktree(wt: Worktree | null) {
   paintThinking();
   if (!window.cockpit || !wt) return;
   const on = await window.cockpit.store.thinking(wt.path);
-  // The rail may have been clicked again while that was in flight.
   if (activeWorktree?.path !== wt.path) return;
   thinkingOn = on;
   paintThinking();
@@ -563,8 +565,6 @@ function toggleThinking() {
 }
 
 thinkingBtn.addEventListener('click', toggleThinking);
-// Down here rather than beside the other init calls: those run before
-// `thinkingOn` is initialized, and reading it there is a startup crash.
 paintThinking();
 
 /**
@@ -606,7 +606,7 @@ async function refreshModels() {
   if (!live.length) return;
   catalogue = live;
   adoptCatalogueId();
-  paintPickers();
+  paintAgentSummary();
 }
 
 /** The pinned model's row, or null when unpinned or pinned to an unknown id. */
@@ -629,66 +629,25 @@ function adoptCatalogueId() {
   if (cwd) void window.cockpit?.store.setModel(cwd, modelId);
 }
 
-function option(select: HTMLSelectElement, value: string, label: string, hint?: string) {
-  const el = document.createElement('option');
-  el.value = value;
-  el.textContent = label;
-  // The names alone don't distinguish generations — "Opus (1M context)" could be
-  // any Opus. The CLI's description does, so hang it off the row.
-  if (hint) el.title = hint;
-  select.append(el);
+/** "Opus (1M context)" → "Opus" — the parenthetical earns its keep in the menu's
+ *  full row, not in the three-letter space the summary button has for it. */
+function abbreviateModelLabel(label: string): string {
+  return label.replace(/\s*\(.*\)\s*$/, '');
 }
 
-function paintPickers() {
-  const ready = !!window.cockpit && !!activeWorktree;
-
-  modelPicker.replaceChildren();
-  option(modelPicker, '', 'Model: default', "Whatever Claude Code picks on its own");
-  for (const model of rows()) option(modelPicker, model.value, model.label, model.description);
-  // A worktree pinned to something no list names — a model that went away, or a
-  // pin written by an older build. Keep it selectable rather than silently
-  // repointing the worktree at the default.
-  if (modelId && !pinnedModel()) option(modelPicker, modelId, modelId, 'No longer offered');
-  modelPicker.value = modelId;
-  modelPicker.disabled = !ready;
-  modelPicker.classList.toggle('set', !!modelId);
-  modelPicker.title = !window.cockpit
-    ? 'Switching models needs the desktop app'
-    : !activeWorktree
-      ? 'Select a worktree first'
-      : modelId
-        ? `${activeWorktree.name} is pinned to ${pinnedModel()?.description ?? modelId}`
-        : `${activeWorktree.name} runs on Claude Code's default model`;
-
-  // Effort is only offered where the model takes one — an unpinned model has no
-  // levels to offer, because until one is picked we don't know whose they'd be.
-  const levels = pinnedModel()?.effortLevels ?? [];
-  effortPicker.replaceChildren();
-  option(effortPicker, '', 'Effort: default');
-  for (const level of levels) option(effortPicker, level, `Effort: ${level}`);
-  // A level this model doesn't list — a pin from before the real catalogue said
-  // how far this one goes. It's still what the next turn will send, so show it;
-  // a select with no matching option would quietly read "default" instead.
-  if (effortLevel && !levels.includes(effortLevel)) {
-    option(effortPicker, effortLevel, `Effort: ${effortLevel}`);
-  }
-  effortPicker.value = effortLevel;
-  effortPicker.disabled = !ready || (!levels.length && !effortLevel);
-  effortPicker.classList.toggle('set', !!effortLevel);
-  effortPicker.title = !ready
-    ? 'Select a worktree first'
-    : !levels.length
-      ? modelId
-        ? `${pinnedModel()?.label ?? modelId} has no effort setting`
-        : 'Pin a model to choose how hard it works'
-      : `How hard ${activeWorktree?.name} thinks before it answers`;
-}
+const EFFORT_ABBR: Record<string, string> = {
+  low: 'Lo',
+  medium: 'Med',
+  high: 'Hi',
+  xhigh: 'XHi',
+  max: 'Max',
+};
 
 /** Adopt a worktree's pins; it may have been left on either last session. */
 async function setAgentWorktree(wt: Worktree | null) {
   modelId = '';
   effortLevel = '';
-  paintPickers();
+  paintAgentSummary();
   if (!window.cockpit || !wt) return;
   const [model, effort] = await Promise.all([
     window.cockpit.store.model(wt.path),
@@ -698,34 +657,193 @@ async function setAgentWorktree(wt: Worktree | null) {
   if (activeWorktree?.path !== wt.path) return;
   modelId = model;
   effortLevel = effort;
-  paintPickers();
+  paintAgentSummary();
 }
 
-modelPicker.addEventListener('change', () => {
+function selectModel(value: string) {
   const cwd = activeWorktree?.path;
   if (!cwd || !window.cockpit) return;
-  modelId = modelPicker.value;
+  modelId = value;
   void window.cockpit.store.setModel(cwd, modelId);
   // The new model may not take the effort the old one was set to — Haiku takes
   // none, and the 4.6 generation has no `xhigh`. Drop it rather than sending the
   // next turn a level it rejects.
   const levels = pinnedModel()?.effortLevels ?? [];
-  if (effortLevel && !levels.includes(effortLevel)) {
-    effortLevel = '';
-    void window.cockpit.store.setEffort(cwd, '');
+  if (levels.length && !levels.includes(effortLevel as EffortLevel)) {
+    effortLevel = levels.includes('high') ? 'high' : levels[0];
+    void window.cockpit.store.setEffort(cwd, effortLevel);
   }
-  paintPickers();
-});
+  paintAgentSummary();
+  renderAgentMenu();
+}
 
-effortPicker.addEventListener('change', () => {
+function selectEffort(value: EffortChoice) {
   const cwd = activeWorktree?.path;
   if (!cwd || !window.cockpit) return;
-  effortLevel = effortPicker.value as EffortChoice;
+  effortLevel = value;
   void window.cockpit.store.setEffort(cwd, effortLevel);
-  paintPickers();
+  paintAgentSummary();
+  renderAgentMenu();
+}
+
+/**
+ * The composer's ✳/model/effort controls, squeezed onto Send's line as one
+ * button. It shows just enough to say what the next turn will do — a full
+ * sentence lives in the title, and the dropdown is where any of it changes.
+ */
+function paintAgentSummary() {
+  const ready = !!window.cockpit && !!activeWorktree;
+  agentSettingsBtn.disabled = !ready;
+
+  const model = document.createElement('span');
+  model.className = 'agent-seg active';
+  model.textContent = abbreviateModelLabel(pinnedModel()?.label ?? modelId);
+
+  const effort = document.createElement('span');
+  effort.className = 'agent-seg active';
+  effort.textContent = EFFORT_ABBR[effortLevel] || effortLevel;
+
+  agentSettingsBtn.replaceChildren(model, document.createTextNode(' · '), effort);
+  agentSettingsBtn.classList.add('on');
+
+  const levels = pinnedModel()?.effortLevels ?? [];
+  agentSettingsBtn.title = !window.cockpit
+    ? 'Model and effort need the desktop app'
+    : !activeWorktree
+      ? 'Select a worktree first'
+      : [
+          `Model: ${pinnedModel()?.description ?? modelId}`,
+          !levels.length
+            ? `Effort: ${pinnedModel()?.label ?? modelId} has no effort setting`
+            : `Effort: ${effortLevel}`,
+        ].join('\n');
+
+  renderAgentMenu();
+}
+
+function agentMenuRow(
+  label: string,
+  opts: { active?: boolean; disabled?: boolean; hint?: string; onClick?: () => void },
+) {
+  const el = document.createElement('div');
+  el.className = 'tab-menu-item agent-menu-item';
+  el.classList.toggle('active', !!opts.active);
+  el.classList.toggle('disabled', !!opts.disabled);
+  el.textContent = label;
+  if (opts.hint) el.title = opts.hint;
+  if (opts.onClick && !opts.disabled) {
+    const run = opts.onClick;
+    el.addEventListener('click', (event) => {
+      event.stopPropagation();
+      run();
+    });
+  }
+  return el;
+}
+
+function agentMenuLabel(text: string) {
+  const el = document.createElement('div');
+  el.className = 'agent-menu-label';
+  el.textContent = text;
+  return el;
+}
+
+function buildAgentMenu(): HTMLElement {
+  const menu = document.createElement('div');
+  menu.className = 'tab-menu agent-menu';
+  menu.addEventListener('click', (event) => event.stopPropagation());
+
+  menu.append(agentMenuLabel('Model'));
+  for (const model of rows()) {
+    menu.append(
+      agentMenuRow(model.label, {
+        active: modelId === model.value || modelId === model.resolvedModel,
+        hint: model.description,
+        onClick: () => selectModel(model.value),
+      }),
+    );
+  }
+  // A worktree pinned to something no list names — a model that went away, or a
+  // pin written by an older build. Show it rather than silently repointing the
+  // worktree at the default.
+  if (modelId && !pinnedModel()) {
+    menu.append(agentMenuRow(modelId, { active: true, hint: 'No longer offered' }));
+  }
+
+  menu.append(agentMenuLabel('Effort'));
+  const levels = pinnedModel()?.effortLevels ?? [];
+  if (!levels.length) {
+    menu.append(
+      agentMenuRow(
+        `${pinnedModel()?.label ?? modelId} has no effort setting`,
+        { disabled: true },
+      ),
+    );
+  } else {
+    for (const level of levels) {
+      menu.append(
+        agentMenuRow(level, { active: effortLevel === level, onClick: () => selectEffort(level) }),
+      );
+    }
+  }
+  return menu;
+}
+
+/** The open ✳/model/effort dropdown, so a second click — or one outside it — takes it back down. */
+let agentMenu: HTMLElement | null = null;
+
+/** Redraw the open menu in place, e.g. after a selection or a catalogue refresh. Not a swap. */
+function renderAgentMenu() {
+  if (!agentMenu) return;
+  const fresh = buildAgentMenu();
+  fresh.style.left = agentMenu.style.left;
+  fresh.style.top = agentMenu.style.top;
+  agentMenu.replaceWith(fresh);
+  agentMenu = fresh;
+}
+
+function closeAgentMenu() {
+  if (!agentMenu) return;
+  agentMenu.remove();
+  agentMenu = null;
+  agentSettingsBtn.setAttribute('aria-expanded', 'false');
+}
+
+function openAgentMenu() {
+  if (agentSettingsBtn.disabled) return;
+  if (agentMenu) {
+    closeAgentMenu();
+    return;
+  }
+  const menu = buildAgentMenu();
+  menu.style.visibility = 'hidden';
+  document.body.append(menu);
+
+  const rect = agentSettingsBtn.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const left = Math.max(6, Math.min(rect.left, window.innerWidth - width - 6));
+  // The composer sits low in the window — prefer opening upward, and only drop
+  // below the button if there's nowhere above for the menu to fit.
+  const top = rect.top - height - 6 >= 6 ? rect.top - height - 6 : Math.min(rect.bottom + 6, window.innerHeight - height - 6);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = '';
+
+  agentMenu = menu;
+  agentSettingsBtn.setAttribute('aria-expanded', 'true');
+}
+
+agentSettingsBtn.addEventListener('click', (event) => {
+  event.stopPropagation();
+  openAgentMenu();
+});
+document.addEventListener('click', () => closeAgentMenu());
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeAgentMenu();
 });
 
-paintPickers();
+paintAgentSummary();
 void refreshModels();
 
 /**
@@ -834,12 +952,6 @@ composer.addEventListener('drop', (event) => {
   if (files.length) void attach(files);
 });
 
-stopBtn.addEventListener('click', () => {
-  if (activeWorktree && runningCwds.has(activeWorktree.path)) {
-    window.cockpit?.agent.interrupt(activeWorktree.path);
-  }
-});
-
 async function sendPrompt() {
   const prompt = promptInput.value.trim();
   // A screenshot with nothing typed is a prompt in its own right — "look at
@@ -893,7 +1005,13 @@ async function sendPrompt() {
   }
 }
 
-sendBtn.addEventListener('click', sendPrompt);
+sendBtn.addEventListener('click', () => {
+  if (activeWorktree && runningCwds.has(activeWorktree.path)) {
+    window.cockpit?.agent.interrupt(activeWorktree.path);
+  } else {
+    sendPrompt();
+  }
+});
 promptInput.addEventListener('input', noteDraft);
 // Clicking away is the moment a draft is most likely to be abandoned for a
 // while — land it now rather than trusting the debounce to outlive the window.
