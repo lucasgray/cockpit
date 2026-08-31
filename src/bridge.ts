@@ -131,6 +131,8 @@ export type CockpitBridge = {
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;
     interrupt: (cwd: string) => Promise<void>;
+    /** Tear down a worktree's session so the next prompt starts fresh. */
+    reset: (cwd: string) => Promise<void>;
     /** Answer a pending `question` event, unblocking the ask tool's turn. */
     answer: (cwd: string, id: string, selection: string) => Promise<void>;
     /**
