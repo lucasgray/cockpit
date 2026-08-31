@@ -277,6 +277,17 @@ export class WorktreeRail {
 
     drawer.append(this.prControl(wt));
 
+    const reset = document.createElement('button');
+    reset.className = 'wt-drawer-btn';
+    reset.textContent = '↻ Reset session';
+    reset.title = 'Clear conversation history and start a fresh session';
+    reset.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.cockpit?.agent.reset(wt.path);
+      this.closeDrawer();
+    });
+    drawer.append(reset);
+
     if (!wt.isMain) {
       const remove = document.createElement('button');
       remove.className = 'wt-drawer-btn wt-drawer-remove';

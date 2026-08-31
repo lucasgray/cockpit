@@ -6,8 +6,9 @@ import type {
   Query,
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import type { AgentEvent, OutboundImage, TodoItem, TodoStatus } from '../src/agent/protocol';
@@ -441,10 +442,14 @@ class Session {
     });
     // First session up fills the model switcher for the whole app.
     fillCatalog(this.query);
-    this.pump = this.drain(this.query).catch((error) => {
-      this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) });
-      this.finishTurn();
-    });
+    this.pump = this.drain(this.query)
+      .catch((error) => {
+        this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+        this.finishTurn();
+      })
+      .finally(() => {
+        this.query = null;
+      });
   }
 
   private finishTurn() {
@@ -467,7 +472,16 @@ class Session {
       }
 
       if (msg.type === 'assistant') {
-        if (msg.error) this.emit({ type: 'error', message: `Claude: ${msg.error}` });
+        if (msg.error) {
+          const content = msg.message?.content;
+          const detail = Array.isArray(content)
+            ? content
+                .filter((b): b is { type: 'text'; text: string } => (b as { type: string }).type === 'text')
+                .map((b) => b.text)
+                .join(' ')
+            : '';
+          this.emit({ type: 'error', message: detail || `Claude: ${msg.error}` });
+        }
         const content = msg.message?.content;
         if (!Array.isArray(content)) continue;
         for (const block of content) {
@@ -698,6 +712,26 @@ export async function closeAgent(cwd: string): Promise<void> {
   if (!session) return;
   sessions.delete(cwd);
   await session.close();
+}
+
+/**
+ * Full reset: tear down the session and wipe the SDK's conversation transcripts
+ * for this cwd, so the next session starts with a clean context window.
+ */
+export async function resetAgent(cwd: string): Promise<void> {
+  await closeAgent(cwd);
+  const encoded = cwd.replace(/\//g, '-');
+  const dir = path.join(homedir(), '.claude', 'projects', encoded);
+  try {
+    const files = await readdir(dir);
+    await Promise.all(
+      files
+        .filter((f) => f.endsWith('.jsonl'))
+        .map((f) => unlink(path.join(dir, f))),
+    );
+  } catch {
+    // Directory may not exist yet — nothing to clean.
+  }
 }
 
 export async function closeAllAgents(): Promise<void> {

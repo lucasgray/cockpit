@@ -958,6 +958,19 @@ async function sendPrompt() {
   // this" — so either half is enough to send on.
   if (!prompt && !attachments.length) return;
 
+  if (prompt === '/clear') {
+    promptInput.value = '';
+    if (activeWorktree) {
+      const cwd = activeWorktree.path;
+      drafts.set(cwd, '');
+      saveDraft(cwd);
+      window.cockpit?.agent.reset(cwd);
+      cockpit.reset();
+      setStatusLine('Session cleared — next prompt starts fresh.');
+    }
+    return;
+  }
+
   // Turns run against a worktree through the main process — in the browser there
   // is no bridge and nothing to run against.
   if (!window.cockpit?.agent) {

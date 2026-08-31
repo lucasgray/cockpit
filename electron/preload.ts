@@ -33,6 +33,7 @@ const bridge: CockpitBridge = {
         .finally(() => ipcRenderer.removeListener(channel, listener));
     },
     interrupt: (cwd: string) => ipcRenderer.invoke('agent:interrupt', cwd),
+    reset: (cwd: string) => ipcRenderer.invoke('agent:reset', cwd),
     answer: (cwd: string, id: string, selection: string) =>
       ipcRenderer.invoke('agent:answer', { cwd, id, selection }),
     models: () => ipcRenderer.invoke('agent:models'),

@@ -11,6 +11,7 @@ import {
   closeAllAgents,
   interruptAgent,
   modelCatalog,
+  resetAgent,
   runAgent,
 } from './agentRunner';
 import { dirStamps, listDir, readFileContents, writeFileContents } from './files';
@@ -436,6 +437,7 @@ app.whenReady().then(() => {
     },
   );
   ipcMain.handle('agent:interrupt', (_event, cwd: string) => interruptAgent(cwd));
+  ipcMain.handle('agent:reset', (_event, cwd: string) => resetAgent(cwd));
   ipcMain.handle('agent:models', () => modelCatalog());
   ipcMain.handle(
     'agent:answer',
