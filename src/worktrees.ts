@@ -64,6 +64,10 @@ export class WorktreeRail {
   private prByPath = new Map<string, PrInfo>();
   /** The worktree whose PR is being opened right now — its button shows a wait. */
   private prBusy: string | null = null;
+  /** Worktrees whose PR status is being looked up for the first time this
+   *  session — the button waits on the answer rather than guessing "Open PR"
+   *  and flipping to "Update PR" a moment later. */
+  private prChecking = new Set<string>();
   private prError: { path: string; message: string } | null = null;
   /** The worktree showing its delete confirmation, if any. */
   private confirmPath: string | null = null;
@@ -267,6 +271,9 @@ export class WorktreeRail {
       this.prError = null;
       this.error = null;
       this.drawerOpening = opening;
+      // Only guess-free the very first time: with a PR already cached the button
+      // can show "Update PR" straight away and let the lookup reconcile it.
+      if (opening && !this.prByPath.has(wt.path)) this.prChecking.add(wt.path);
       this.render();
       if (opening) void this.loadPrStatus(wt);
     });
@@ -339,6 +346,11 @@ export class WorktreeRail {
     if (this.prBusy === wt.path) {
       btn.textContent = pr ? '⤴ Updating PR…' : '⤴ Opening PR…';
       btn.disabled = true;
+    } else if (this.prChecking.has(wt.path) && !pr) {
+      // No cached answer yet — wait for the lookup rather than commit to a
+      // label we might have to flip.
+      btn.textContent = '⤴ Checking PR…';
+      btn.disabled = true;
     } else {
       btn.textContent = pr ? `⤴ Update PR` : '⤴ Open PR';
       btn.title = pr
@@ -366,18 +378,36 @@ export class WorktreeRail {
     return wrap;
   }
 
-  /** Look up whether the worktree's branch already has an open PR, and repaint
-   *  the drawer if it does — but only while it's still the open one. */
+  /**
+   * Look up whether the worktree's branch has an open PR and reconcile the
+   * drawer to the answer — run each time the drawer opens, but only applied
+   * while it's still the open one. A `null` result is a real state, not a
+   * non-answer: a PR that's been merged or closed (or a branch that changed
+   * out from under a cached PR) has to flip the button back to "Open PR" and
+   * drop its "#N ↗" link, so a stale entry is cleared rather than left
+   * standing. Only repaints when the PR actually appeared, vanished, or changed
+   * number, so re-opening a settled drawer doesn't restart its unfold.
+   */
   private async loadPrStatus(wt: Worktree) {
     let pr: PrInfo | null;
     try {
       pr = await window.cockpit!.pr.status(wt.path);
     } catch {
-      return; // No status is just "Open PR"; a failed lookup shouldn't shout.
+      // A failed lookup shouldn't wipe a known-good PR or shout — but the
+      // "Checking PR…" placeholder still has to fall back to "Open PR".
+      if (this.prChecking.delete(wt.path) && this.openPath === wt.path) this.render();
+      return;
     }
-    if (!pr || this.openPath !== wt.path) return;
-    this.prByPath.set(wt.path, pr);
-    this.render();
+    if (this.openPath !== wt.path) {
+      this.prChecking.delete(wt.path);
+      return;
+    }
+    const wasChecking = this.prChecking.delete(wt.path);
+    const prev = this.prByPath.get(wt.path) ?? null;
+    if (pr) this.prByPath.set(wt.path, pr);
+    else this.prByPath.delete(wt.path);
+    // Repaint to clear the placeholder, or whenever the PR itself changed.
+    if (wasChecking || (prev?.number ?? null) !== (pr?.number ?? null)) this.render();
   }
 
   private async openPr(wt: Worktree) {

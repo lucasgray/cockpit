@@ -387,12 +387,15 @@ app.whenReady().then(() => {
   ipcMain.handle('worktrees:diff', (_event, cwd: string) => worktreeDiff(cwd));
   ipcMain.handle('worktrees:remove', (_event, cwd: string) => removeWorktree(cwd));
   ipcMain.handle('pr:status', async (_event, cwd: string) => {
-    // Live gh is the source of truth; the remembered PR is the fallback when it
-    // can't answer, so a known PR still labels the button offline.
+    // Live gh is the source of truth; the remembered PR is only a fallback for
+    // when it can't answer (offline, gh missing), so a known PR still labels the
+    // button. When gh *does* answer — including "no open PR" for a merged or
+    // closed one — trust it and keep the remembered PR in sync, so a stale #N
+    // stops labeling the button now and next session.
     const live = await prStatus(cwd);
-    if (live) {
-      getStore().setPr(cwd, { number: live.number, url: live.url });
-      return live;
+    if (live.reachable) {
+      getStore().setPr(cwd, live.pr ? { number: live.pr.number, url: live.pr.url } : null);
+      return live.pr;
     }
     return getStore().pr(cwd);
   });

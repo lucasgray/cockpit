@@ -111,13 +111,32 @@ async function commitIfDirty(cwd: string): Promise<boolean> {
 }
 
 /**
- * The open PR for `branch`, straight from GitHub. Returns null when there's no
- * PR yet, when gh isn't reachable, or when the only PR is already merged/closed —
- * none of which is an open PR the button should offer to update.
+ * A PR lookup's outcome. `reachable` marks whether gh gave a definitive answer:
+ * when it did, `pr` is the open PR or null (no PR yet, or the only one is already
+ * merged/closed — both mean "nothing to update"), and a null is trustworthy
+ * enough to forget a remembered PR by. When gh couldn't answer at all (offline,
+ * not installed), `reachable` is false and the caller should keep whatever it
+ * last remembered rather than treat silence as "no PR".
  */
-export async function prStatus(cwd: string): Promise<PrInfo | null> {
+export type PrLookup = { reachable: true; pr: PrInfo | null } | { reachable: false };
+
+/** gh exits non-zero both when a branch simply has no PR and when it can't reach
+ *  GitHub at all; only the former is a definitive "no open PR" we can act on. */
+function isNoPrError(error: unknown): boolean {
+  const stderr = (error as { stderr?: string }).stderr;
+  return typeof stderr === 'string' && /no.*pull requests? found/i.test(stderr);
+}
+
+/**
+ * The open PR for the worktree's branch, straight from GitHub. See {@link PrLookup}:
+ * a reachable lookup distinguishes "gh says no open PR" (which should clear a
+ * remembered merged/closed PR) from "gh couldn't answer" (which should not).
+ */
+export async function prStatus(cwd: string): Promise<PrLookup> {
   const branch = await currentBranch(cwd).catch(() => '');
-  if (!branch) return null;
+  // A git failure or detached HEAD isn't gh saying "no PR" — leave any remembered
+  // PR standing rather than clobber it on a transient hiccup.
+  if (!branch) return { reachable: false };
   try {
     const { stdout } = await execFileAsync(
       'gh',
@@ -125,12 +144,13 @@ export async function prStatus(cwd: string): Promise<PrInfo | null> {
       { cwd },
     );
     const data = JSON.parse(stdout) as { number?: number; url?: string; state?: string };
-    if (typeof data.number !== 'number' || !data.url) return null;
-    if (data.state && data.state !== 'OPEN') return null;
-    return { number: data.number, url: data.url, state: data.state };
-  } catch {
-    // No PR for this branch, or gh unavailable — either way, nothing to update.
-    return null;
+    if (typeof data.number !== 'number' || !data.url) return { reachable: true, pr: null };
+    if (data.state && data.state !== 'OPEN') return { reachable: true, pr: null };
+    return { reachable: true, pr: { number: data.number, url: data.url, state: data.state } };
+  } catch (error) {
+    // gh answered "no PR for this branch" → definitive; anything else (offline, gh
+    // missing) → unreachable, so a remembered PR isn't forgotten over a blip.
+    return isNoPrError(error) ? { reachable: true, pr: null } : { reachable: false };
   }
 }
 
@@ -166,7 +186,7 @@ export async function openPr(cwd: string): Promise<PrResult> {
   // The push already updated any open PR; report it rather than trying to create
   // a second one (which gh would refuse anyway).
   const existing = await prStatus(cwd);
-  if (existing) return { ok: true, pr: existing, created: false };
+  if (existing.reachable && existing.pr) return { ok: true, pr: existing.pr, created: false };
 
   try {
     await execFileAsync('gh', ['pr', 'create', '--fill', '--head', branch], { cwd });
@@ -175,6 +195,8 @@ export async function openPr(cwd: string): Promise<PrResult> {
   }
 
   const created = await prStatus(cwd);
-  if (!created) return { ok: false, error: 'PR created, but reading its number back failed.' };
-  return { ok: true, pr: created, created: true };
+  if (!created.reachable || !created.pr) {
+    return { ok: false, error: 'PR created, but reading its number back failed.' };
+  }
+  return { ok: true, pr: created.pr, created: true };
 }
