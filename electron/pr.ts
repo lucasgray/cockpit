@@ -26,34 +26,47 @@ const nextStepId = () => `pr-step-${(prStepSeq += 1)}`;
 /** Diff sent to the commit-message model — plenty for context, cheap to send. */
 const DIFF_BUDGET = 20_000;
 
-/** No PR step should run forever. A push or `gh` call that stalls (a credential
- *  prompt, an unreachable host) has to fail loudly, not spin the button. */
-const STEP_TIMEOUT = 60_000;
+/**
+ * Ceiling for a single git/gh child. A push or a `gh` API call can be slow, but
+ * none of these legitimately take minutes — a stuck one means a prompt we can't
+ * answer or a dead connection, and the flow must fail loudly rather than leave
+ * the UI spinning on "Opening PR…" forever.
+ */
+const CMD_TIMEOUT_MS = 90_000;
 
-/** The commit/branch text calls stream from the model; cap them so a query that
- *  never lands a result message falls back instead of hanging the whole flow. */
-const MODEL_TIMEOUT = 45_000;
+/**
+ * Ceiling for a model completion (commit message or branch name). Unlike a git/gh
+ * child this isn't a subprocess we can hand `timeout` to — it's an async iterator
+ * that simply never yields a `result` if the model or transport stalls, and a
+ * `for await` on it would hang with nothing to reject the caller's fallback. So
+ * completeText bounds it with an abort controller and throws, letting the flow
+ * fall back instead of hanging on "Opening PR…" forever.
+ */
+const MODEL_TIMEOUT_MS = 60_000;
 
-/** Reject `p` if it hasn't settled within `ms`, so a stalled step surfaces. */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    p.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
+/** Permissions that let an account push a branch — i.e. open a same-repo PR. */
+const CAN_PUSH = /^(WRITE|MAINTAIN|ADMIN)$/;
+
+/**
+ * Environment for a `gh` child. `GH_PROMPT_DISABLED` is the load-bearing part:
+ * the app spawns `gh` with no TTY, so if gh ever drops into an interactive survey
+ * — most notably its "create a fork?" prompt when the active account lacks push —
+ * it would block on stdin that never answers and hang the whole PR flow. Disabling
+ * prompts turns that into an immediate error the UI can show. An optional token
+ * overrides the identity for this one process (see {@link ghPushToken}).
+ */
+function ghEnv(token?: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: '1' };
+  if (token) env.GH_TOKEN = token;
+  return env;
 }
 
 /** The branch a worktree currently has checked out, or '' on a detached HEAD. */
 async function currentBranch(cwd: string): Promise<string> {
-  const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
+  const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+    cwd,
+    timeout: CMD_TIMEOUT_MS,
+  });
   const branch = stdout.trim();
   return branch === 'HEAD' ? '' : branch;
 }
@@ -100,9 +113,83 @@ function slugify(text: string): string {
 
 /** stderr carries the useful failure; fall back to the argv-wrapping message. */
 function toolError(error: unknown): string {
+  // A timed-out child was killed by us, not by the tool — say so, since its own
+  // output (if any) won't explain the silence. See CMD_TIMEOUT_MS.
+  const killed = (error as { killed?: boolean }).killed;
+  const signal = (error as { signal?: string }).signal;
+  const message = error instanceof Error ? error.message : '';
+  if (killed && signal && !/maxBuffer/i.test(message)) {
+    return 'Command timed out — it was likely waiting on a prompt that can’t be answered here.';
+  }
   const stderr = (error as { stderr?: string }).stderr;
   if (typeof stderr === 'string' && stderr.trim()) return stderr.trim();
   return error instanceof Error ? error.message.trim() : String(error);
+}
+
+/** The gh accounts logged in for this host, as gh prints them in `auth status`. */
+async function ghAccounts(cwd: string): Promise<string[]> {
+  try {
+    const { stdout, stderr } = await execFileAsync('gh', ['auth', 'status'], {
+      cwd,
+      env: ghEnv(),
+      timeout: CMD_TIMEOUT_MS,
+    });
+    const seen = new Set<string>();
+    for (const m of `${stdout}\n${stderr}`.matchAll(/account (\S+)/g)) seen.add(m[1]);
+    return [...seen];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A gh token whose account can push to the repo at `cwd`, or undefined to run gh
+ * as-is. gh authenticates as whatever account is *active* in its own config, which
+ * needn't be the one that can push here: a work login can be active while the repo
+ * is personal, and then a same-repo `gh pr create` has no push access and stalls on
+ * the fork prompt. `git push` sidesteps this — it rides the SSH key, a separate
+ * identity — so the two can disagree about who you are. We reconcile them for gh:
+ * if the active account already has push, run as-is (the common case, no override);
+ * otherwise find a logged-in account that does and hand gh *its* token for this one
+ * process via GH_TOKEN, never touching gh's global active account. Returns undefined
+ * when none qualify, so gh runs and reports its own error rather than us guessing.
+ */
+async function ghPushToken(cwd: string): Promise<string | undefined> {
+  const viewerPermission = async (token?: string): Promise<string> => {
+    const { stdout } = await execFileAsync(
+      'gh',
+      ['repo', 'view', '--json', 'viewerPermission', '--jq', '.viewerPermission'],
+      { cwd, env: ghEnv(token), timeout: CMD_TIMEOUT_MS },
+    );
+    return stdout.trim();
+  };
+
+  try {
+    if (CAN_PUSH.test(await viewerPermission())) return undefined;
+  } catch {
+    // The active account can't even read the repo (or gh choked) — fall through
+    // and see whether some other logged-in account can push.
+  }
+
+  for (const account of await ghAccounts(cwd)) {
+    let token = '';
+    try {
+      const { stdout } = await execFileAsync('gh', ['auth', 'token', '--user', account], {
+        env: ghEnv(),
+        timeout: CMD_TIMEOUT_MS,
+      });
+      token = stdout.trim();
+    } catch {
+      continue;
+    }
+    if (!token) continue;
+    try {
+      if (CAN_PUSH.test(await viewerPermission(token))) return token;
+    } catch {
+      // This account can't see the repo either — try the next.
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -144,9 +231,17 @@ async function fallbackCommitMessage(cwd: string): Promise<string> {
  */
 async function completeText(prompt: string): Promise<string> {
   const { query } = await loadSdk();
-  const run = (async () => {
-    let text = '';
-    for await (const msg of query({ prompt, options: { tools: [], maxTurns: 1, model: 'haiku' } })) {
+  // A stalled model never yields `result`, so bound the stream with an abort
+  // controller: on timeout we abort the query (which ends the iterator) and throw,
+  // so the caller falls back rather than hanging the PR flow.
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), MODEL_TIMEOUT_MS);
+  let text = '';
+  try {
+    for await (const msg of query({
+      prompt,
+      options: { tools: [], maxTurns: 1, model: 'haiku', abortController: abort },
+    })) {
       if (msg.type === 'assistant') {
         const content = msg.message?.content;
         if (Array.isArray(content)) {
@@ -155,9 +250,11 @@ async function completeText(prompt: string): Promise<string> {
       }
       if (msg.type === 'result') break;
     }
-    return text.trim();
-  })();
-  return withTimeout(run, MODEL_TIMEOUT, 'text generation');
+  } finally {
+    clearTimeout(timer);
+  }
+  if (abort.signal.aborted) throw new Error('model call timed out');
+  return text.trim();
 }
 
 /** Clip a diff to the model budget, with a marker when it's been cut. */
@@ -227,16 +324,20 @@ async function newBranchName(cwd: string): Promise<string> {
  * was committed, purely for logging; the caller doesn't branch on it.
  */
 async function commitIfDirty(cwd: string): Promise<boolean> {
-  const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], { cwd });
+  const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], {
+    cwd,
+    timeout: CMD_TIMEOUT_MS,
+  });
   if (!status.trim()) return false;
 
-  await execFileAsync('git', ['add', '-A'], { cwd });
+  await execFileAsync('git', ['add', '-A'], { cwd, timeout: CMD_TIMEOUT_MS });
   const { stdout: diff } = await execFileAsync('git', ['diff', '--cached'], {
     cwd,
     maxBuffer: 8 * 1024 * 1024,
+    timeout: CMD_TIMEOUT_MS,
   });
   const message = await generateCommitMessage(diff).catch(() => fallbackCommitMessage(cwd));
-  await execFileAsync('git', ['commit', '-m', message], { cwd });
+  await execFileAsync('git', ['commit', '-m', message], { cwd, timeout: CMD_TIMEOUT_MS });
   return true;
 }
 
@@ -262,7 +363,7 @@ function isNoPrError(error: unknown): boolean {
  * a reachable lookup distinguishes "gh says no open PR" (which should clear a
  * remembered merged/closed PR) from "gh couldn't answer" (which should not).
  */
-export async function prStatus(cwd: string): Promise<PrLookup> {
+export async function prStatus(cwd: string, token?: string): Promise<PrLookup> {
   const branch = await currentBranch(cwd).catch(() => '');
   // A git failure or detached HEAD isn't gh saying "no PR" — leave any remembered
   // PR standing rather than clobber it on a transient hiccup.
@@ -271,7 +372,7 @@ export async function prStatus(cwd: string): Promise<PrLookup> {
     const { stdout } = await execFileAsync(
       'gh',
       ['pr', 'view', branch, '--json', 'number,url,state'],
-      { cwd },
+      { cwd, env: ghEnv(token), timeout: CMD_TIMEOUT_MS },
     );
     const data = JSON.parse(stdout) as { number?: number; url?: string; state?: string };
     if (typeof data.number !== 'number' || !data.url) return { reachable: true, pr: null };
@@ -284,16 +385,6 @@ export async function prStatus(cwd: string): Promise<PrLookup> {
   }
 }
 
-/**
- * Push the worktree's branch and make sure it has a PR. A push is the update
- * path when a PR already exists; when none does, `gh pr create --fill` opens one
- * from the branch's commits. Never forces: a rejected push means the remote has
- * work this branch doesn't, and a PR flow must surface that, not bulldoze it.
- *
- * A PR can't target the default branch from itself, and the remote refuses a
- * direct push to it anyway — so when the worktree is sitting on the default
- * branch, cut a fresh feature branch first and open the PR from that.
- */
 /** Announce a failure in the transcript and hand it back as the flow's result,
  *  so a pre-flight stumble (before any step row opened) still shows as a ⚠ line. */
 function prFailed(onEvent: PrProgress, message: string): PrResult {
@@ -309,6 +400,16 @@ function prOpened(onEvent: PrProgress, pr: PrInfo, created: boolean): PrResult {
   return { ok: true, pr, created };
 }
 
+/**
+ * Push the worktree's branch and make sure it has a PR. A push is the update
+ * path when a PR already exists; when none does, `gh pr create --fill` opens one
+ * from the branch's commits. Never forces: a rejected push means the remote has
+ * work this branch doesn't, and a PR flow must surface that, not bulldoze it.
+ *
+ * A PR can't target the default branch from itself, and the remote refuses a
+ * direct push to it anyway — so when the worktree is sitting on the default
+ * branch, cut a fresh feature branch first and open the PR from that.
+ */
 export async function openPr(cwd: string, onEvent: PrProgress = ignoreProgress): Promise<PrResult> {
   // A lead-in bubble frames the block, the way a turn's echoed prompt does — the
   // step rows that follow read as one PR operation rather than loose git rows.
@@ -361,7 +462,7 @@ export async function openPr(cwd: string, onEvent: PrProgress = ignoreProgress):
     try {
       await execFileAsync('git', ['push', '--set-upstream', 'origin', branch], {
         cwd,
-        timeout: STEP_TIMEOUT,
+        timeout: CMD_TIMEOUT_MS,
       });
       onEvent({ type: 'tool_end', id, ok: true });
     } catch (error) {
@@ -370,9 +471,14 @@ export async function openPr(cwd: string, onEvent: PrProgress = ignoreProgress):
     }
   }
 
+  // gh authenticates as its active account, which may not be the one that can push
+  // here; resolve the account that can, so `gh pr create` opens a same-repo PR
+  // instead of stalling on a fork prompt it can't answer. Undefined => run gh as-is.
+  const token = await ghPushToken(cwd);
+
   // The push already updated any open PR; report it rather than trying to create
   // a second one (which gh would refuse anyway).
-  const existing = await prStatus(cwd);
+  const existing = await prStatus(cwd, token);
   if (existing.reachable && existing.pr) return prOpened(onEvent, existing.pr, false);
 
   {
@@ -384,7 +490,7 @@ export async function openPr(cwd: string, onEvent: PrProgress = ignoreProgress):
     console.log('[cockpit] pr: creating PR from', branch, base ? `into ${base}` : '');
     onEvent({ type: 'tool_start', id, name: 'gh pr create', summary: base ? `into ${base}` : branch });
     try {
-      await execFileAsync('gh', createArgs, { cwd, timeout: STEP_TIMEOUT });
+      await execFileAsync('gh', createArgs, { cwd, env: ghEnv(token), timeout: CMD_TIMEOUT_MS });
       onEvent({ type: 'tool_end', id, ok: true });
     } catch (error) {
       onEvent({ type: 'tool_end', id, ok: false });
@@ -392,7 +498,7 @@ export async function openPr(cwd: string, onEvent: PrProgress = ignoreProgress):
     }
   }
 
-  const created = await prStatus(cwd);
+  const created = await prStatus(cwd, token);
   if (!created.reachable || !created.pr) {
     return prFailed(onEvent, 'PR created, but reading its number back failed.');
   }
