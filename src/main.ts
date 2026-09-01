@@ -240,8 +240,7 @@ function setStatusLine(text: string) {
 function paintRunButton() {
   const running = runState.state === 'running';
   runAppBtn.textContent = running ? '■ Stop' : '▶ Run';
-  runAppBtn.classList.toggle('danger', running);
-  runAppBtn.classList.toggle('primary', !running);
+  runAppBtn.classList.add('primary');
   runAppBtn.disabled = !window.cockpit || !activeWorktree;
 
   if (!activeWorktree) {
@@ -365,6 +364,10 @@ const rail = new WorktreeRail(
     fileTree.dropWorktree(path);
     fileView.dropWorktree(path);
   },
+  // PR steps stream into their worktree's pane, so the flow shows up in the
+  // transcript even while another worktree is on screen — same routing a
+  // background agent turn's events take.
+  (cwd, event) => cockpit.handleEvent(cwd, event),
 );
 
 /**

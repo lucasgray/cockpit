@@ -20,7 +20,17 @@ const bridge: CockpitBridge = {
   },
   pr: {
     status: (cwd: string) => ipcRenderer.invoke('pr:status', cwd),
-    open: (cwd: string) => ipcRenderer.invoke('pr:open', cwd),
+    // Like agent.run: the flow streams its steps back on a per-call channel while
+    // the promise carries the final result. The transcript draws them as they land.
+    open: (cwd: string, onEvent: (event: AgentEvent) => void) => {
+      const runId = crypto.randomUUID();
+      const channel = `agent:event:${runId}`;
+      const listener = (_e: unknown, event: AgentEvent) => onEvent(event);
+      ipcRenderer.on(channel, listener);
+      return ipcRenderer
+        .invoke('pr:open', { cwd, runId })
+        .finally(() => ipcRenderer.removeListener(channel, listener));
+    },
   },
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => {

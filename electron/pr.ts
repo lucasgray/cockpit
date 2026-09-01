@@ -1,23 +1,30 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { AgentEvent } from '../src/agent/protocol';
 import type { PrInfo, PrResult } from '../src/bridge';
 import { loadSdk } from './agentRunner';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * The PR flow streams its steps into the worktree's transcript the same way an
+ * agent turn does: each git/gh step becomes a tool row, so a stall or a rejected
+ * push lands as a ✗ on the exact step with its error attached — not just a line
+ * in the app's own console. Defaults to a no-op, so a caller that only wants the
+ * result (e.g. a test) can ignore the narration.
+ */
+export type PrProgress = (event: AgentEvent) => void;
+const ignoreProgress: PrProgress = () => {};
+
+/** Unique ids for the transcript's tool rows, so each step's start/end pair up.
+ *  Monotonic within a session; a step always closes before the next opens, so a
+ *  counter reset across restarts can't cross two live rows. */
+let prStepSeq = 0;
+const nextStepId = () => `pr-step-${(prStepSeq += 1)}`;
+
 /** Diff sent to the commit-message model — plenty for context, cheap to send. */
 const DIFF_BUDGET = 20_000;
-
-/**
- * Ceiling for the commit-message SDK call. Unlike a git/gh child this isn't a
- * subprocess we can hand `timeout` to — it's an async iterator that simply never
- * yields a `result` if the model or transport stalls, and a `for await` on it
- * would hang with nothing to reject the `.catch()` fallback. So we bound it here
- * and abort, letting the flow fall back to a generated message instead of the UI
- * spinning on "Opening PR…" forever.
- */
-const COMMIT_MSG_TIMEOUT_MS = 60_000;
 
 /**
  * Ceiling for a single git/gh child. A push or a `gh` API call can be slow, but
@@ -26,6 +33,16 @@ const COMMIT_MSG_TIMEOUT_MS = 60_000;
  * the UI spinning on "Opening PR…" forever.
  */
 const CMD_TIMEOUT_MS = 90_000;
+
+/**
+ * Ceiling for a model completion (commit message or branch name). Unlike a git/gh
+ * child this isn't a subprocess we can hand `timeout` to — it's an async iterator
+ * that simply never yields a `result` if the model or transport stalls, and a
+ * `for await` on it would hang with nothing to reject the caller's fallback. So
+ * completeText bounds it with an abort controller and throws, letting the flow
+ * fall back instead of hanging on "Opening PR…" forever.
+ */
+const MODEL_TIMEOUT_MS = 60_000;
 
 /** Permissions that let an account push a branch — i.e. open a same-repo PR. */
 const CAN_PUSH = /^(WRITE|MAINTAIN|ADMIN)$/;
@@ -52,6 +69,46 @@ async function currentBranch(cwd: string): Promise<string> {
   });
   const branch = stdout.trim();
   return branch === 'HEAD' ? '' : branch;
+}
+
+/**
+ * The repo's default branch (the one `origin/HEAD` points at), or '' when it
+ * can't be resolved. Used to recognise when a worktree is sitting on the branch
+ * a PR should never target directly, so the flow can branch off it first.
+ */
+async function defaultBranch(cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+      { cwd },
+    );
+    const ref = stdout.trim();
+    const slash = ref.indexOf('/');
+    return slash === -1 ? ref : ref.slice(slash + 1);
+  } catch {
+    return '';
+  }
+}
+
+/** Does this local branch already exist? Keeps a generated name from colliding. */
+async function branchExists(cwd: string, name: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`], { cwd });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Fold arbitrary text down to a safe kebab-case git branch slug. */
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50)
+    .replace(/-+$/g, '');
 }
 
 /** stderr carries the useful failure; fall back to the argv-wrapping message. */
@@ -168,28 +225,17 @@ async function fallbackCommitMessage(cwd: string): Promise<string> {
 }
 
 /**
- * A one-line-subject (+ optional body) commit message written from the staged
- * diff. Runs the SDK with no tools and one turn — a plain text completion, not
- * an agent session — so it costs a single cheap call rather than spinning up a
- * full Claude Code turn.
+ * A single cheap text completion: the SDK with no tools and one turn — not an
+ * agent session — so it's one call rather than a full Claude Code turn. Shared by
+ * the commit-message and branch-name generators.
  */
-async function generateCommitMessage(diff: string): Promise<string> {
-  const trimmed = diff.length > DIFF_BUDGET ? `${diff.slice(0, DIFF_BUDGET)}\n… (truncated)` : diff;
-  if (!trimmed.trim()) throw new Error('empty diff');
-
+async function completeText(prompt: string): Promise<string> {
   const { query } = await loadSdk();
-  const prompt =
-    'Write a git commit message for the diff below. One short imperative subject line ' +
-    '(under 72 characters), and only if it genuinely helps, a blank line followed by 1-3 ' +
-    'sentences on why the change was made. Plain text only: no markdown, no backticks, no ' +
-    'surrounding quotes, no "Co-Authored-By" line. Reply with nothing but the commit message.\n\n' +
-    trimmed;
-
   // A stalled model never yields `result`, so bound the stream with an abort
   // controller: on timeout we abort the query (which ends the iterator) and throw,
-  // handing off to the fallback message rather than hanging the PR flow.
+  // so the caller falls back rather than hanging the PR flow.
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), COMMIT_MSG_TIMEOUT_MS);
+  const timer = setTimeout(() => abort.abort(), MODEL_TIMEOUT_MS);
   let text = '';
   try {
     for await (const msg of query({
@@ -207,11 +253,67 @@ async function generateCommitMessage(diff: string): Promise<string> {
   } finally {
     clearTimeout(timer);
   }
-  if (abort.signal.aborted) throw new Error('commit message timed out');
+  if (abort.signal.aborted) throw new Error('model call timed out');
+  return text.trim();
+}
 
-  const cleaned = text.trim();
+/** Clip a diff to the model budget, with a marker when it's been cut. */
+function clipDiff(diff: string): string {
+  return diff.length > DIFF_BUDGET ? `${diff.slice(0, DIFF_BUDGET)}\n… (truncated)` : diff;
+}
+
+/**
+ * A one-line-subject (+ optional body) commit message written from the staged
+ * diff.
+ */
+async function generateCommitMessage(diff: string): Promise<string> {
+  const trimmed = clipDiff(diff);
+  if (!trimmed.trim()) throw new Error('empty diff');
+
+  const prompt =
+    'Write a git commit message for the diff below. One short imperative subject line ' +
+    '(under 72 characters), and only if it genuinely helps, a blank line followed by 1-3 ' +
+    'sentences on why the change was made. Plain text only: no markdown, no backticks, no ' +
+    'surrounding quotes, no "Co-Authored-By" line. Reply with nothing but the commit message.\n\n' +
+    trimmed;
+
+  const cleaned = await completeText(prompt);
   if (!cleaned) throw new Error('empty commit message');
   return cleaned;
+}
+
+/**
+ * A short kebab-case branch name suggested from the pending change, falling back
+ * to the last commit's subject and finally a generic slug — always something the
+ * flow can create a branch from. Guaranteed not to collide with a local branch.
+ */
+async function newBranchName(cwd: string): Promise<string> {
+  let seed = '';
+  try {
+    const { stdout: diff } = await execFileAsync('git', ['diff', 'HEAD'], {
+      cwd,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    if (diff.trim()) {
+      const prompt =
+        'Suggest a git branch name for the diff below. Two to four words, lowercase, ' +
+        'hyphen-separated (kebab-case). No slashes, no prefixes, no quotes. ' +
+        'Reply with nothing but the branch name.\n\n' + clipDiff(diff);
+      seed = await completeText(prompt).catch(() => '');
+    }
+  } catch {
+    // fall through to the commit-subject seed
+  }
+  if (!slugify(seed)) {
+    seed = await execFileAsync('git', ['log', '-1', '--format=%s'], { cwd })
+      .then((r) => r.stdout.trim())
+      .catch(() => '');
+  }
+
+  const base = slugify(seed) || 'cockpit-pr';
+  let name = base;
+  for (let n = 2; await branchExists(cwd, name); n++) name = `${base}-${n}`;
+  return name;
 }
 
 /**
@@ -283,36 +385,90 @@ export async function prStatus(cwd: string, token?: string): Promise<PrLookup> {
   }
 }
 
+/** Announce a failure in the transcript and hand it back as the flow's result,
+ *  so a pre-flight stumble (before any step row opened) still shows as a ⚠ line. */
+function prFailed(onEvent: PrProgress, message: string): PrResult {
+  onEvent({ type: 'error', message });
+  return { ok: false, error: message };
+}
+
+/** Close out the transcript with the finished PR and hand it back. `created`
+ *  separates a freshly opened PR from a push that updated an existing one. */
+function prOpened(onEvent: PrProgress, pr: PrInfo, created: boolean): PrResult {
+  const verb = created ? 'Opened' : 'Updated';
+  onEvent({ type: 'say', text: `**${verb} pull request [#${pr.number}](${pr.url})**` });
+  return { ok: true, pr, created };
+}
+
 /**
  * Push the worktree's branch and make sure it has a PR. A push is the update
  * path when a PR already exists; when none does, `gh pr create --fill` opens one
  * from the branch's commits. Never forces: a rejected push means the remote has
  * work this branch doesn't, and a PR flow must surface that, not bulldoze it.
+ *
+ * A PR can't target the default branch from itself, and the remote refuses a
+ * direct push to it anyway — so when the worktree is sitting on the default
+ * branch, cut a fresh feature branch first and open the PR from that.
  */
-export async function openPr(cwd: string): Promise<PrResult> {
+export async function openPr(cwd: string, onEvent: PrProgress = ignoreProgress): Promise<PrResult> {
+  // A lead-in bubble frames the block, the way a turn's echoed prompt does — the
+  // step rows that follow read as one PR operation rather than loose git rows.
+  onEvent({ type: 'say', text: '**⤴ Opening pull request**' });
+
   let branch: string;
   try {
     branch = await currentBranch(cwd);
   } catch (error) {
-    return { ok: false, error: toolError(error) };
+    return prFailed(onEvent, toolError(error));
   }
   if (!branch) {
-    return { ok: false, error: 'This worktree is on a detached HEAD — nothing to open a PR from.' };
+    return prFailed(onEvent, 'This worktree is on a detached HEAD — nothing to open a PR from.');
   }
 
-  try {
-    await commitIfDirty(cwd);
-  } catch (error) {
-    return { ok: false, error: toolError(error) };
+  const base = await defaultBranch(cwd);
+  const onDefault = base ? branch === base : branch === 'main' || branch === 'master';
+  if (onDefault) {
+    const id = nextStepId();
+    try {
+      const name = await newBranchName(cwd);
+      console.log('[cockpit] pr: on default branch, cutting feature branch', name);
+      onEvent({ type: 'tool_start', id, name: 'git checkout -b', summary: name });
+      await execFileAsync('git', ['checkout', '-b', name], { cwd });
+      branch = name;
+      onEvent({ type: 'tool_end', id, ok: true });
+    } catch (error) {
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, toolError(error));
+    }
   }
 
-  try {
-    await execFileAsync('git', ['push', '--set-upstream', 'origin', branch], {
-      cwd,
-      timeout: CMD_TIMEOUT_MS,
-    });
-  } catch (error) {
-    return { ok: false, error: pushError(error) };
+  {
+    const id = nextStepId();
+    console.log('[cockpit] pr: committing pending changes on', branch);
+    onEvent({ type: 'tool_start', id, name: 'git commit', summary: `pending changes on ${branch}` });
+    try {
+      await commitIfDirty(cwd);
+      onEvent({ type: 'tool_end', id, ok: true });
+    } catch (error) {
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, toolError(error));
+    }
+  }
+
+  {
+    const id = nextStepId();
+    console.log('[cockpit] pr: pushing', branch);
+    onEvent({ type: 'tool_start', id, name: 'git push', summary: `origin ${branch}` });
+    try {
+      await execFileAsync('git', ['push', '--set-upstream', 'origin', branch], {
+        cwd,
+        timeout: CMD_TIMEOUT_MS,
+      });
+      onEvent({ type: 'tool_end', id, ok: true });
+    } catch (error) {
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, pushError(error));
+    }
   }
 
   // gh authenticates as its active account, which may not be the one that can push
@@ -323,21 +479,28 @@ export async function openPr(cwd: string): Promise<PrResult> {
   // The push already updated any open PR; report it rather than trying to create
   // a second one (which gh would refuse anyway).
   const existing = await prStatus(cwd, token);
-  if (existing.reachable && existing.pr) return { ok: true, pr: existing.pr, created: false };
+  if (existing.reachable && existing.pr) return prOpened(onEvent, existing.pr, false);
 
-  try {
-    await execFileAsync('gh', ['pr', 'create', '--fill', '--head', branch], {
-      cwd,
-      env: ghEnv(token),
-      timeout: CMD_TIMEOUT_MS,
-    });
-  } catch (error) {
-    return { ok: false, error: toolError(error) };
+  {
+    const id = nextStepId();
+    // `--fill` (title/body from the commits) keeps this non-interactive, and an
+    // explicit `--base` spares gh from having to prompt for the target branch.
+    const createArgs = ['pr', 'create', '--fill', '--head', branch];
+    if (base) createArgs.push('--base', base);
+    console.log('[cockpit] pr: creating PR from', branch, base ? `into ${base}` : '');
+    onEvent({ type: 'tool_start', id, name: 'gh pr create', summary: base ? `into ${base}` : branch });
+    try {
+      await execFileAsync('gh', createArgs, { cwd, env: ghEnv(token), timeout: CMD_TIMEOUT_MS });
+      onEvent({ type: 'tool_end', id, ok: true });
+    } catch (error) {
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, toolError(error));
+    }
   }
 
   const created = await prStatus(cwd, token);
   if (!created.reachable || !created.pr) {
-    return { ok: false, error: 'PR created, but reading its number back failed.' };
+    return prFailed(onEvent, 'PR created, but reading its number back failed.');
   }
-  return { ok: true, pr: created.pr, created: true };
+  return prOpened(onEvent, created.pr, true);
 }
