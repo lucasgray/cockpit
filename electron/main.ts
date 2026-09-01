@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, protocol, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
@@ -34,8 +34,18 @@ import { resolvePort } from '../src/port';
 
 const execFileAsync = promisify(execFile);
 
-const PROJECT_ROOT =
-  process.env.COCKPIT_PROJECT_ROOT || '/Users/lucas-play/Documents/projects/cockpit';
+/**
+ * The git repository the cockpit manages — every git call runs with this as its
+ * cwd. Point the cockpit at a repo with `COCKPIT_PROJECT_ROOT`; unset, it falls
+ * back to the directory the app was launched from, which under `npm run app` is
+ * the repo itself.
+ *
+ * This used to default to one machine's absolute path. A missing env var then
+ * sent every git call `chdir`ing into a directory this account can't read, and
+ * the failed chdir surfaced as a cryptic `spawn git EACCES` — see the assertion
+ * in `whenReady` that now turns a bad root into a legible error instead.
+ */
+const PROJECT_ROOT = path.resolve(process.env.COCKPIT_PROJECT_ROOT || process.cwd());
 
 /**
  * How a transcript names a screenshot it is holding.
@@ -61,8 +71,31 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+/**
+ * Fail fast, and legibly, if `PROJECT_ROOT` isn't a git repo we can reach.
+ *
+ * Every feature runs git in this directory, so a wrong or unreadable root breaks
+ * all of them the same cryptic way (`spawn git EACCES` from a failed chdir). One
+ * check at startup trades that for a message that names the actual problem and
+ * how to fix it. Returns whether the root is usable; the caller decides.
+ */
+async function assertProjectRoot(): Promise<boolean> {
+  try {
+    await git(PROJECT_ROOT, ['rev-parse', '--is-inside-work-tree']);
+    return true;
+  } catch {
+    const message =
+      `COCKPIT_PROJECT_ROOT is not a readable git repository:\n\n${PROJECT_ROOT}\n\n` +
+      `Launch the cockpit pointed at your repo, e.g.\n` +
+      `  COCKPIT_PROJECT_ROOT=/path/to/repo npm run app`;
+    console.error(message);
+    dialog.showErrorBox('Cockpit: no project repository', message);
+    return false;
+  }
+}
+
 /** Fallback create hook when settings don't pin one. */
-const BOOTSTRAP = process.env.COCKPIT_BOOTSTRAP || 'npm install';
+const WORKTREE_CREATE_HOOK = process.env.COCKPIT_WORKTREE_CREATE_HOOK || 'npm install';
 
 function dirForBranch(branch: string): string {
   const safe = branch.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'worktree';
@@ -87,7 +120,7 @@ async function branchExists(branch: string): Promise<boolean> {
  * when it exits.
  */
 function runCreateHook(dir: string, branch: string, port: number) {
-  const command = getStore().settings().worktreeCreateHook || BOOTSTRAP;
+  const command = getStore().settings().worktreeCreateHook || WORKTREE_CREATE_HOOK;
   if (!command) return;
 
   let tail = '';
@@ -366,6 +399,11 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // A sensible default covers the normal launch, so this rarely fires — but when
+  // the root is wrong it names the problem up front instead of letting every git
+  // call fail the same cryptic way.
+  void assertProjectRoot();
+
   // The app's own state lives beside the app, never in the repo being worked on.
   openStore(app.getPath('userData'));
   openImageStore(app.getPath('userData'));

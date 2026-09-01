@@ -16,8 +16,9 @@ npm run app
 One command: it starts Vite, waits for it, builds the Electron main/preload,
 and launches the window. The **left rail lists your live git worktrees** (read
 by the Electron main process via `git worktree list`), with a Worktrees|Files
-switcher; picking one sets the active worktree. Point it at a repo other than
-the default with `COCKPIT_PROJECT_ROOT=/path/to/repo npm run app`.
+switcher; picking one sets the active worktree. By default the cockpit manages
+the repo you launch it from; point it at another with
+`COCKPIT_PROJECT_ROOT=/path/to/repo npm run app`.
 
 > The cockpit is the desktop app: worktrees and agent turns both live in the
 > Electron main process, so `npm run dev` on its own only serves the UI shell.

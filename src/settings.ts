@@ -178,7 +178,7 @@ export type CockpitSettings = {
   runCommand: string;
   /**
    * Shell command run in a freshly created worktree, or '' for the default
-   * (`$COCKPIT_BOOTSTRAP`, else `npm install`).
+   * (`$COCKPIT_WORKTREE_CREATE_HOOK`, else `npm install`).
    *
    * Receives the worktree's newly assigned port as `COCKPIT_PORT` and `PORT`, so
    * a project that needs the port baked into a file — an `.env`, a compose
