@@ -240,8 +240,7 @@ function setStatusLine(text: string) {
 function paintRunButton() {
   const running = runState.state === 'running';
   runAppBtn.textContent = running ? '■ Stop' : '▶ Run';
-  runAppBtn.classList.toggle('danger', running);
-  runAppBtn.classList.toggle('primary', !running);
+  runAppBtn.classList.add('primary');
   runAppBtn.disabled = !window.cockpit || !activeWorktree;
 
   if (!activeWorktree) {

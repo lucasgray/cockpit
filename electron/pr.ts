@@ -16,6 +16,46 @@ async function currentBranch(cwd: string): Promise<string> {
   return branch === 'HEAD' ? '' : branch;
 }
 
+/**
+ * The repo's default branch (the one `origin/HEAD` points at), or '' when it
+ * can't be resolved. Used to recognise when a worktree is sitting on the branch
+ * a PR should never target directly, so the flow can branch off it first.
+ */
+async function defaultBranch(cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+      { cwd },
+    );
+    const ref = stdout.trim();
+    const slash = ref.indexOf('/');
+    return slash === -1 ? ref : ref.slice(slash + 1);
+  } catch {
+    return '';
+  }
+}
+
+/** Does this local branch already exist? Keeps a generated name from colliding. */
+async function branchExists(cwd: string, name: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`], { cwd });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Fold arbitrary text down to a safe kebab-case git branch slug. */
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50)
+    .replace(/-+$/g, '');
+}
+
 /** stderr carries the useful failure; fall back to the argv-wrapping message. */
 function toolError(error: unknown): string {
   const stderr = (error as { stderr?: string }).stderr;
@@ -56,23 +96,12 @@ async function fallbackCommitMessage(cwd: string): Promise<string> {
 }
 
 /**
- * A one-line-subject (+ optional body) commit message written from the staged
- * diff. Runs the SDK with no tools and one turn — a plain text completion, not
- * an agent session — so it costs a single cheap call rather than spinning up a
- * full Claude Code turn.
+ * A single cheap text completion: the SDK with no tools and one turn — not an
+ * agent session — so it's one call rather than a full Claude Code turn. Shared by
+ * the commit-message and branch-name generators.
  */
-async function generateCommitMessage(diff: string): Promise<string> {
-  const trimmed = diff.length > DIFF_BUDGET ? `${diff.slice(0, DIFF_BUDGET)}\n… (truncated)` : diff;
-  if (!trimmed.trim()) throw new Error('empty diff');
-
+async function completeText(prompt: string): Promise<string> {
   const { query } = await loadSdk();
-  const prompt =
-    'Write a git commit message for the diff below. One short imperative subject line ' +
-    '(under 72 characters), and only if it genuinely helps, a blank line followed by 1-3 ' +
-    'sentences on why the change was made. Plain text only: no markdown, no backticks, no ' +
-    'surrounding quotes, no "Co-Authored-By" line. Reply with nothing but the commit message.\n\n' +
-    trimmed;
-
   let text = '';
   for await (const msg of query({ prompt, options: { tools: [], maxTurns: 1, model: 'haiku' } })) {
     if (msg.type === 'assistant') {
@@ -83,10 +112,66 @@ async function generateCommitMessage(diff: string): Promise<string> {
     }
     if (msg.type === 'result') break;
   }
+  return text.trim();
+}
 
-  const cleaned = text.trim();
+/** Clip a diff to the model budget, with a marker when it's been cut. */
+function clipDiff(diff: string): string {
+  return diff.length > DIFF_BUDGET ? `${diff.slice(0, DIFF_BUDGET)}\n… (truncated)` : diff;
+}
+
+/**
+ * A one-line-subject (+ optional body) commit message written from the staged
+ * diff.
+ */
+async function generateCommitMessage(diff: string): Promise<string> {
+  const trimmed = clipDiff(diff);
+  if (!trimmed.trim()) throw new Error('empty diff');
+
+  const prompt =
+    'Write a git commit message for the diff below. One short imperative subject line ' +
+    '(under 72 characters), and only if it genuinely helps, a blank line followed by 1-3 ' +
+    'sentences on why the change was made. Plain text only: no markdown, no backticks, no ' +
+    'surrounding quotes, no "Co-Authored-By" line. Reply with nothing but the commit message.\n\n' +
+    trimmed;
+
+  const cleaned = await completeText(prompt);
   if (!cleaned) throw new Error('empty commit message');
   return cleaned;
+}
+
+/**
+ * A short kebab-case branch name suggested from the pending change, falling back
+ * to the last commit's subject and finally a generic slug — always something the
+ * flow can create a branch from. Guaranteed not to collide with a local branch.
+ */
+async function newBranchName(cwd: string): Promise<string> {
+  let seed = '';
+  try {
+    const { stdout: diff } = await execFileAsync('git', ['diff', 'HEAD'], {
+      cwd,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    if (diff.trim()) {
+      const prompt =
+        'Suggest a git branch name for the diff below. Two to four words, lowercase, ' +
+        'hyphen-separated (kebab-case). No slashes, no prefixes, no quotes. ' +
+        'Reply with nothing but the branch name.\n\n' + clipDiff(diff);
+      seed = await completeText(prompt).catch(() => '');
+    }
+  } catch {
+    // fall through to the commit-subject seed
+  }
+  if (!slugify(seed)) {
+    seed = await execFileAsync('git', ['log', '-1', '--format=%s'], { cwd })
+      .then((r) => r.stdout.trim())
+      .catch(() => '');
+  }
+
+  const base = slugify(seed) || 'cockpit-pr';
+  let name = base;
+  for (let n = 2; await branchExists(cwd, name); n++) name = `${base}-${n}`;
+  return name;
 }
 
 /**
@@ -159,6 +244,10 @@ export async function prStatus(cwd: string): Promise<PrLookup> {
  * path when a PR already exists; when none does, `gh pr create --fill` opens one
  * from the branch's commits. Never forces: a rejected push means the remote has
  * work this branch doesn't, and a PR flow must surface that, not bulldoze it.
+ *
+ * A PR can't target the default branch from itself, and the remote refuses a
+ * direct push to it anyway — so when the worktree is sitting on the default
+ * branch, cut a fresh feature branch first and open the PR from that.
  */
 export async function openPr(cwd: string): Promise<PrResult> {
   let branch: string;
@@ -169,6 +258,18 @@ export async function openPr(cwd: string): Promise<PrResult> {
   }
   if (!branch) {
     return { ok: false, error: 'This worktree is on a detached HEAD — nothing to open a PR from.' };
+  }
+
+  const base = await defaultBranch(cwd);
+  const onDefault = base ? branch === base : branch === 'main' || branch === 'master';
+  if (onDefault) {
+    try {
+      const name = await newBranchName(cwd);
+      await execFileAsync('git', ['checkout', '-b', name], { cwd });
+      branch = name;
+    } catch (error) {
+      return { ok: false, error: toolError(error) };
+    }
   }
 
   try {
