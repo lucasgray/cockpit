@@ -146,8 +146,8 @@ body {
 }
 
 .btn.stop {
-  border-color: var(--danger);
-  color: var(--danger);
+  border-color: var(--accent);
+  color: var(--accent);
   min-width: 0;
   padding: 7px 12px;
 }
