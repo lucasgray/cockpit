@@ -10,6 +10,16 @@ const execFileAsync = promisify(execFile);
 const DIFF_BUDGET = 20_000;
 
 /**
+ * Ceiling for the commit-message SDK call. Unlike a git/gh child this isn't a
+ * subprocess we can hand `timeout` to — it's an async iterator that simply never
+ * yields a `result` if the model or transport stalls, and a `for await` on it
+ * would hang with nothing to reject the `.catch()` fallback. So we bound it here
+ * and abort, letting the flow fall back to a generated message instead of the UI
+ * spinning on "Opening PR…" forever.
+ */
+const COMMIT_MSG_TIMEOUT_MS = 60_000;
+
+/**
  * Ceiling for a single git/gh child. A push or a `gh` API call can be slow, but
  * none of these legitimately take minutes — a stuck one means a prompt we can't
  * answer or a dead connection, and the flow must fail loudly rather than leave
@@ -175,16 +185,29 @@ async function generateCommitMessage(diff: string): Promise<string> {
     'surrounding quotes, no "Co-Authored-By" line. Reply with nothing but the commit message.\n\n' +
     trimmed;
 
+  // A stalled model never yields `result`, so bound the stream with an abort
+  // controller: on timeout we abort the query (which ends the iterator) and throw,
+  // handing off to the fallback message rather than hanging the PR flow.
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), COMMIT_MSG_TIMEOUT_MS);
   let text = '';
-  for await (const msg of query({ prompt, options: { tools: [], maxTurns: 1, model: 'haiku' } })) {
-    if (msg.type === 'assistant') {
-      const content = msg.message?.content;
-      if (Array.isArray(content)) {
-        for (const block of content) if (block.type === 'text') text += block.text;
+  try {
+    for await (const msg of query({
+      prompt,
+      options: { tools: [], maxTurns: 1, model: 'haiku', abortController: abort },
+    })) {
+      if (msg.type === 'assistant') {
+        const content = msg.message?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) if (block.type === 'text') text += block.text;
+        }
       }
+      if (msg.type === 'result') break;
     }
-    if (msg.type === 'result') break;
+  } finally {
+    clearTimeout(timer);
   }
+  if (abort.signal.aborted) throw new Error('commit message timed out');
 
   const cleaned = text.trim();
   if (!cleaned) throw new Error('empty commit message');
