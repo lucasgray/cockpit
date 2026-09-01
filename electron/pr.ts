@@ -9,6 +9,31 @@ const execFileAsync = promisify(execFile);
 /** Diff sent to the commit-message model — plenty for context, cheap to send. */
 const DIFF_BUDGET = 20_000;
 
+/** No PR step should run forever. A push or `gh` call that stalls (a credential
+ *  prompt, an unreachable host) has to fail loudly, not spin the button. */
+const STEP_TIMEOUT = 60_000;
+
+/** The commit/branch text calls stream from the model; cap them so a query that
+ *  never lands a result message falls back instead of hanging the whole flow. */
+const MODEL_TIMEOUT = 45_000;
+
+/** Reject `p` if it hasn't settled within `ms`, so a stalled step surfaces. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** The branch a worktree currently has checked out, or '' on a detached HEAD. */
 async function currentBranch(cwd: string): Promise<string> {
   const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
@@ -102,17 +127,20 @@ async function fallbackCommitMessage(cwd: string): Promise<string> {
  */
 async function completeText(prompt: string): Promise<string> {
   const { query } = await loadSdk();
-  let text = '';
-  for await (const msg of query({ prompt, options: { tools: [], maxTurns: 1, model: 'haiku' } })) {
-    if (msg.type === 'assistant') {
-      const content = msg.message?.content;
-      if (Array.isArray(content)) {
-        for (const block of content) if (block.type === 'text') text += block.text;
+  const run = (async () => {
+    let text = '';
+    for await (const msg of query({ prompt, options: { tools: [], maxTurns: 1, model: 'haiku' } })) {
+      if (msg.type === 'assistant') {
+        const content = msg.message?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) if (block.type === 'text') text += block.text;
+        }
       }
+      if (msg.type === 'result') break;
     }
-    if (msg.type === 'result') break;
-  }
-  return text.trim();
+    return text.trim();
+  })();
+  return withTimeout(run, MODEL_TIMEOUT, 'text generation');
 }
 
 /** Clip a diff to the model budget, with a marker when it's been cut. */
@@ -265,6 +293,7 @@ export async function openPr(cwd: string): Promise<PrResult> {
   if (onDefault) {
     try {
       const name = await newBranchName(cwd);
+      console.log('[cockpit] pr: on default branch, cutting feature branch', name);
       await execFileAsync('git', ['checkout', '-b', name], { cwd });
       branch = name;
     } catch (error) {
@@ -273,13 +302,18 @@ export async function openPr(cwd: string): Promise<PrResult> {
   }
 
   try {
+    console.log('[cockpit] pr: committing pending changes on', branch);
     await commitIfDirty(cwd);
   } catch (error) {
     return { ok: false, error: toolError(error) };
   }
 
   try {
-    await execFileAsync('git', ['push', '--set-upstream', 'origin', branch], { cwd });
+    console.log('[cockpit] pr: pushing', branch);
+    await execFileAsync('git', ['push', '--set-upstream', 'origin', branch], {
+      cwd,
+      timeout: STEP_TIMEOUT,
+    });
   } catch (error) {
     return { ok: false, error: pushError(error) };
   }
@@ -290,7 +324,12 @@ export async function openPr(cwd: string): Promise<PrResult> {
   if (existing.reachable && existing.pr) return { ok: true, pr: existing.pr, created: false };
 
   try {
-    await execFileAsync('gh', ['pr', 'create', '--fill', '--head', branch], { cwd });
+    // `--fill` (title/body from the commits) keeps this non-interactive, and an
+    // explicit `--base` spares gh from having to prompt for the target branch.
+    const createArgs = ['pr', 'create', '--fill', '--head', branch];
+    if (base) createArgs.push('--base', base);
+    console.log('[cockpit] pr: creating PR from', branch, base ? `into ${base}` : '');
+    await execFileAsync('gh', createArgs, { cwd, timeout: STEP_TIMEOUT });
   } catch (error) {
     return { ok: false, error: toolError(error) };
   }
