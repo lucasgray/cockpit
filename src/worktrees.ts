@@ -1,3 +1,4 @@
+import type { AgentEvent } from './agent/protocol';
 import type { PrInfo, Worktree, WorktreeRemoveResult } from './bridge';
 
 /**
@@ -52,6 +53,9 @@ export class WorktreeRail {
   private container: HTMLElement;
   private onSelect: (wt: Worktree) => void;
   private onRemoved: (path: string) => void;
+  /** Routes a PR step into a worktree's transcript pane — the same sink an agent
+   *  turn's events flow through, so the flow draws in the conversation above. */
+  private onTranscript: (cwd: string, event: AgentEvent) => void;
   private activePath: string | null = null;
   private worktrees: Worktree[] = [];
   /** The worktree whose actions drawer is open, if any. One at a time. */
@@ -88,10 +92,12 @@ export class WorktreeRail {
     container: HTMLElement,
     onSelect: (wt: Worktree) => void,
     onRemoved: (path: string) => void,
+    onTranscript: (cwd: string, event: AgentEvent) => void,
   ) {
     this.container = container;
     this.onSelect = onSelect;
     this.onRemoved = onRemoved;
+    this.onTranscript = onTranscript;
 
     // Close the drawer on a click anywhere outside the rows — but not on a click
     // that lands on a row, which the row's own handlers already resolve (its ⋯
@@ -417,7 +423,9 @@ export class WorktreeRail {
     this.render();
 
     try {
-      const res = await window.cockpit!.pr.open(wt.path);
+      const res = await window.cockpit!.pr.open(wt.path, (event) =>
+        this.onTranscript(wt.path, event),
+      );
       if (res.ok && res.pr) this.prByPath.set(wt.path, res.pr);
       else this.prError = { path: wt.path, message: res.error ?? 'failed' };
     } catch (error) {

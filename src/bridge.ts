@@ -125,8 +125,11 @@ export type CockpitBridge = {
      * Push the branch and, if no PR exists, create one from its commits. Never
      * force-pushes — a rejected push is surfaced, not overridden. Pushing when a
      * PR is already open is how it updates.
+     *
+     * Each step streams back through `onEvent` as an `AgentEvent`, so the flow
+     * draws into the worktree's transcript the same way an agent turn does.
      */
-    open: (cwd: string) => Promise<PrResult>;
+    open: (cwd: string, onEvent: (event: AgentEvent) => void) => Promise<PrResult>;
   };
   agent: {
     run: (req: AgentRunRequest, onEvent: (event: AgentEvent) => void) => Promise<void>;

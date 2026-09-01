@@ -437,10 +437,18 @@ app.whenReady().then(() => {
     }
     return getStore().pr(cwd);
   });
-  ipcMain.handle('pr:open', async (_event, cwd: string) => {
-    const result = await openPr(cwd);
+  ipcMain.handle('pr:open', async (event, req: { cwd: string; runId: string }) => {
+    const { cwd, runId } = req;
+    const store = getStore();
+    // Each PR step is streamed into the worktree's transcript exactly like an
+    // agent turn: persisted so a reopened worktree still shows it, and pushed
+    // live on the run's own channel so it draws as it happens.
+    const result = await openPr(cwd, (agentEvent) => {
+      store.appendEvent(cwd, agentEvent);
+      event.sender.send(`agent:event:${runId}`, agentEvent);
+    });
     if (result.ok && result.pr) {
-      getStore().setPr(cwd, { number: result.pr.number, url: result.pr.url });
+      store.setPr(cwd, { number: result.pr.number, url: result.pr.url });
     }
     return result;
   });

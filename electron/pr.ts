@@ -1,10 +1,27 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { AgentEvent } from '../src/agent/protocol';
 import type { PrInfo, PrResult } from '../src/bridge';
 import { loadSdk } from './agentRunner';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The PR flow streams its steps into the worktree's transcript the same way an
+ * agent turn does: each git/gh step becomes a tool row, so a stall or a rejected
+ * push lands as a ✗ on the exact step with its error attached — not just a line
+ * in the app's own console. Defaults to a no-op, so a caller that only wants the
+ * result (e.g. a test) can ignore the narration.
+ */
+export type PrProgress = (event: AgentEvent) => void;
+const ignoreProgress: PrProgress = () => {};
+
+/** Unique ids for the transcript's tool rows, so each step's start/end pair up.
+ *  Monotonic within a session; a step always closes before the next opens, so a
+ *  counter reset across restarts can't cross two live rows. */
+let prStepSeq = 0;
+const nextStepId = () => `pr-step-${(prStepSeq += 1)}`;
 
 /** Diff sent to the commit-message model — plenty for context, cheap to send. */
 const DIFF_BUDGET = 20_000;
@@ -277,66 +294,107 @@ export async function prStatus(cwd: string): Promise<PrLookup> {
  * direct push to it anyway — so when the worktree is sitting on the default
  * branch, cut a fresh feature branch first and open the PR from that.
  */
-export async function openPr(cwd: string): Promise<PrResult> {
+/** Announce a failure in the transcript and hand it back as the flow's result,
+ *  so a pre-flight stumble (before any step row opened) still shows as a ⚠ line. */
+function prFailed(onEvent: PrProgress, message: string): PrResult {
+  onEvent({ type: 'error', message });
+  return { ok: false, error: message };
+}
+
+/** Close out the transcript with the finished PR and hand it back. `created`
+ *  separates a freshly opened PR from a push that updated an existing one. */
+function prOpened(onEvent: PrProgress, pr: PrInfo, created: boolean): PrResult {
+  const verb = created ? 'Opened' : 'Updated';
+  onEvent({ type: 'say', text: `**${verb} pull request [#${pr.number}](${pr.url})**` });
+  return { ok: true, pr, created };
+}
+
+export async function openPr(cwd: string, onEvent: PrProgress = ignoreProgress): Promise<PrResult> {
+  // A lead-in bubble frames the block, the way a turn's echoed prompt does — the
+  // step rows that follow read as one PR operation rather than loose git rows.
+  onEvent({ type: 'say', text: '**⤴ Opening pull request**' });
+
   let branch: string;
   try {
     branch = await currentBranch(cwd);
   } catch (error) {
-    return { ok: false, error: toolError(error) };
+    return prFailed(onEvent, toolError(error));
   }
   if (!branch) {
-    return { ok: false, error: 'This worktree is on a detached HEAD — nothing to open a PR from.' };
+    return prFailed(onEvent, 'This worktree is on a detached HEAD — nothing to open a PR from.');
   }
 
   const base = await defaultBranch(cwd);
   const onDefault = base ? branch === base : branch === 'main' || branch === 'master';
   if (onDefault) {
+    const id = nextStepId();
     try {
       const name = await newBranchName(cwd);
       console.log('[cockpit] pr: on default branch, cutting feature branch', name);
+      onEvent({ type: 'tool_start', id, name: 'git checkout -b', summary: name });
       await execFileAsync('git', ['checkout', '-b', name], { cwd });
       branch = name;
+      onEvent({ type: 'tool_end', id, ok: true });
     } catch (error) {
-      return { ok: false, error: toolError(error) };
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, toolError(error));
     }
   }
 
-  try {
+  {
+    const id = nextStepId();
     console.log('[cockpit] pr: committing pending changes on', branch);
-    await commitIfDirty(cwd);
-  } catch (error) {
-    return { ok: false, error: toolError(error) };
+    onEvent({ type: 'tool_start', id, name: 'git commit', summary: `pending changes on ${branch}` });
+    try {
+      await commitIfDirty(cwd);
+      onEvent({ type: 'tool_end', id, ok: true });
+    } catch (error) {
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, toolError(error));
+    }
   }
 
-  try {
+  {
+    const id = nextStepId();
     console.log('[cockpit] pr: pushing', branch);
-    await execFileAsync('git', ['push', '--set-upstream', 'origin', branch], {
-      cwd,
-      timeout: STEP_TIMEOUT,
-    });
-  } catch (error) {
-    return { ok: false, error: pushError(error) };
+    onEvent({ type: 'tool_start', id, name: 'git push', summary: `origin ${branch}` });
+    try {
+      await execFileAsync('git', ['push', '--set-upstream', 'origin', branch], {
+        cwd,
+        timeout: STEP_TIMEOUT,
+      });
+      onEvent({ type: 'tool_end', id, ok: true });
+    } catch (error) {
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, pushError(error));
+    }
   }
 
   // The push already updated any open PR; report it rather than trying to create
   // a second one (which gh would refuse anyway).
   const existing = await prStatus(cwd);
-  if (existing.reachable && existing.pr) return { ok: true, pr: existing.pr, created: false };
+  if (existing.reachable && existing.pr) return prOpened(onEvent, existing.pr, false);
 
-  try {
+  {
+    const id = nextStepId();
     // `--fill` (title/body from the commits) keeps this non-interactive, and an
     // explicit `--base` spares gh from having to prompt for the target branch.
     const createArgs = ['pr', 'create', '--fill', '--head', branch];
     if (base) createArgs.push('--base', base);
     console.log('[cockpit] pr: creating PR from', branch, base ? `into ${base}` : '');
-    await execFileAsync('gh', createArgs, { cwd, timeout: STEP_TIMEOUT });
-  } catch (error) {
-    return { ok: false, error: toolError(error) };
+    onEvent({ type: 'tool_start', id, name: 'gh pr create', summary: base ? `into ${base}` : branch });
+    try {
+      await execFileAsync('gh', createArgs, { cwd, timeout: STEP_TIMEOUT });
+      onEvent({ type: 'tool_end', id, ok: true });
+    } catch (error) {
+      onEvent({ type: 'tool_end', id, ok: false });
+      return prFailed(onEvent, toolError(error));
+    }
   }
 
   const created = await prStatus(cwd);
   if (!created.reachable || !created.pr) {
-    return { ok: false, error: 'PR created, but reading its number back failed.' };
+    return prFailed(onEvent, 'PR created, but reading its number back failed.');
   }
-  return { ok: true, pr: created.pr, created: true };
+  return prOpened(onEvent, created.pr, true);
 }
