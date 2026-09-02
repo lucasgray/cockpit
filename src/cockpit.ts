@@ -50,8 +50,11 @@ type Pane = {
   bubbleText: string;
   /** Characters of bubbleText revealed so far — the text typewriters in. */
   bubbleShown: number;
-  /** This pane's own typewriter frame, so panes can reveal concurrently. */
-  revealFrame: number;
+  /** This pane's own typewriter timer, so panes can reveal concurrently. A
+   *  timeout — not requestAnimationFrame — because an occluded or backgrounded
+   *  window produces no frames, which would freeze the stream mid-reveal until
+   *  the user interacted; timers keep advancing the DOM even while unpainted. */
+  revealTimer: number;
   tools: Map<string, HTMLElement>;
   /** Live subagent rows, keyed by the Task tool_use id, so their inner tool
    *  calls can be counted onto them as a working heartbeat. */
@@ -138,7 +141,7 @@ export class Cockpit {
         bubbleBody: null,
         bubbleText: '',
         bubbleShown: 0,
-        revealFrame: 0,
+        revealTimer: 0,
         tools: new Map(),
         subagents: new Map(),
         todos: null,
@@ -169,9 +172,9 @@ export class Cockpit {
   private closeBubble() {
     const pane = this.pane;
     // Snap the typewriter to the end so a bubble never freezes half-revealed.
-    if (pane.revealFrame) {
-      cancelAnimationFrame(pane.revealFrame);
-      pane.revealFrame = 0;
+    if (pane.revealTimer) {
+      clearTimeout(pane.revealTimer);
+      pane.revealTimer = 0;
     }
     pane.bubbleShown = pane.bubbleText.length;
     if (pane.bubbleBody) this.draw(pane);
@@ -183,9 +186,9 @@ export class Cockpit {
 
   /** Drop a pane's drawn transcript and every live handle into it. */
   private blankPane(pane: Pane) {
-    if (pane.revealFrame) {
-      cancelAnimationFrame(pane.revealFrame);
-      pane.revealFrame = 0;
+    if (pane.revealTimer) {
+      clearTimeout(pane.revealTimer);
+      pane.revealTimer = 0;
     }
     if (pane.spinnerTimer) {
       clearInterval(pane.spinnerTimer);
@@ -253,12 +256,22 @@ export class Cockpit {
     if (this.visible === pane) this.showPane('default');
   }
 
-  /** Full teardown of the visible transcript plus the diff surface. */
-  reset() {
-    this.blankPane(this.visible);
-    this.visible.restored = true;
-    window.cockpit?.store.clearTranscript(this.visible.key);
-    this.resetDiff();
+  /**
+   * Full teardown of a worktree's transcript plus the diff surface. Defaults to
+   * the visible pane (the `/clear` path), but takes a key so the rail's "Reset
+   * session" button can clear a worktree that isn't currently on screen.
+   */
+  reset(key: string = this.visible.key) {
+    const pane = this.panes.get(key);
+    if (pane) {
+      this.blankPane(pane);
+      // A cleared pane must not replay its now-deleted events if reopened.
+      pane.restored = true;
+    }
+    window.cockpit?.store.clearTranscript(key);
+    // The diff surface is shared and shows the visible worktree — only wipe it
+    // when the worktree being reset is the one on screen.
+    if (key === this.visible.key) this.resetDiff();
   }
 
   /** Queue diff work behind whatever is still typing, dropping stale generations. */
@@ -719,14 +732,18 @@ export class Cockpit {
   }
 
   /**
-   * Typewriter: advance the revealed length toward the received text one frame
-   * at a time. The step scales with the backlog so a fast stream still clears
-   * within ~half a second, but never lands fewer than a couple chars per frame.
+   * Typewriter: advance the revealed length toward the received text one tick at
+   * a time. The step scales with the backlog so a fast stream still clears within
+   * ~half a second, but never lands fewer than a couple chars per tick. Ticks are
+   * timeouts, not animation frames: an occluded or backgrounded window produces
+   * no frames, so an rAF loop would freeze the reveal mid-stream and only flush
+   * when the user next interacted — a timer keeps the DOM advancing regardless,
+   * so returning to the window shows the finished transcript, not a frozen half.
    */
   private revealTick(pane: Pane) {
-    if (pane.revealFrame) return;
+    if (pane.revealTimer) return;
     const step = () => {
-      pane.revealFrame = 0;
+      pane.revealTimer = 0;
       const remaining = pane.bubbleText.length - pane.bubbleShown;
       if (remaining <= 0) return;
       pane.bubbleShown += Math.max(2, Math.ceil(remaining / 30));
@@ -734,9 +751,9 @@ export class Cockpit {
       this.draw(pane);
       // This pane may be a background run — only follow scroll if it's on screen.
       if (pane === this.visible) this.conversations.scrollTop = this.conversations.scrollHeight;
-      if (pane.bubbleShown < pane.bubbleText.length) pane.revealFrame = requestAnimationFrame(step);
+      if (pane.bubbleShown < pane.bubbleText.length) pane.revealTimer = window.setTimeout(step, 16);
     };
-    pane.revealFrame = requestAnimationFrame(step);
+    pane.revealTimer = window.setTimeout(step, 16);
   }
 
   /** A tight |/-\ spinner under the prompt while Claude thinks with no output yet. */

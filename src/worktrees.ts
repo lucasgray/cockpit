@@ -56,6 +56,10 @@ export class WorktreeRail {
   /** Routes a PR step into a worktree's transcript pane — the same sink an agent
    *  turn's events flow through, so the flow draws in the conversation above. */
   private onTranscript: (cwd: string, event: AgentEvent) => void;
+  /** Starts a fresh session for a worktree: wipes the SDK conversation and the
+   *  app's stored transcript. Owned by main so it can also reset the pane and
+   *  draft, which the rail has no handle on. */
+  private onReset: (path: string) => void;
   private activePath: string | null = null;
   private worktrees: Worktree[] = [];
   /** The worktree whose actions drawer is open, if any. One at a time. */
@@ -93,11 +97,13 @@ export class WorktreeRail {
     onSelect: (wt: Worktree) => void,
     onRemoved: (path: string) => void,
     onTranscript: (cwd: string, event: AgentEvent) => void,
+    onReset: (path: string) => void,
   ) {
     this.container = container;
     this.onSelect = onSelect;
     this.onRemoved = onRemoved;
     this.onTranscript = onTranscript;
+    this.onReset = onReset;
 
     // Close the drawer on a click anywhere outside the rows — but not on a click
     // that lands on a row, which the row's own handlers already resolve (its ⋯
@@ -313,7 +319,7 @@ export class WorktreeRail {
     reset.title = 'Clear conversation history and start a fresh session';
     reset.addEventListener('click', (e) => {
       e.stopPropagation();
-      window.cockpit?.agent.reset(wt.path);
+      this.onReset(wt.path);
       this.closeDrawer();
     });
     drawer.append(reset);
