@@ -79,6 +79,11 @@ export class Store {
   constructor(dir: string) {
     this.db = new DatabaseSync(path.join(dir, 'cockpit.db'));
     this.db.exec('PRAGMA journal_mode = WAL');
+    // WAL lets readers and one writer coexist, but two writers still collide.
+    // Without a busy timeout a blocked write fails instantly with SQLITE_BUSY
+    // ("database is locked"); wait and retry instead. A second cockpit instance
+    // (another worktree shares this userData path) is the usual contender.
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec(SCHEMA);
   }
 
