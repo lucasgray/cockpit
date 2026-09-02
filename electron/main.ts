@@ -359,6 +359,10 @@ function createWindow() {
     titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
+      // The cockpit runs live agent turns the user watches from another window.
+      // Left throttled, a backgrounded renderer stalls its timers, so a streaming
+      // transcript would freeze until the window was touched again.
+      backgroundThrottling: false,
     },
   });
 
@@ -397,6 +401,16 @@ function createWindow() {
     win.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 }
+
+// backgroundThrottling on the window covers a merely unfocused renderer; these
+// switches cover the harder case macOS adds — a window fully hidden behind
+// another is marked "occluded" and Chromium stops compositing and backgrounds
+// its renderer. Without them a watched agent turn freezes the moment the cockpit
+// is covered and only catches up when it's surfaced again. Must be set before
+// the app is ready.
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
 
 app.whenReady().then(() => {
   // A sensible default covers the normal launch, so this rarely fires — but when
