@@ -139,6 +139,30 @@ rewrite.
 | `electron/store.ts` | SQLite (`node:sqlite`) in the app's userData dir — transcripts, sessions, settings. Never written into the repo under work. |
 | `electron/images.ts` | Pasted screenshots on disk beside that database, and the containment check behind the `cockpit-image://` scheme. |
 
+## Seeing a change render (the `cockpit-probe` skill)
+
+`hmr` is off on purpose (the app hosts live agent sessions), and you must never reload or
+kill the window you're working in — so eyeballing a UI change is fiddly. `tools/cockpit-probe/`
+packages it: a Claude Code skill that launches a **disposable, per-worktree** cockpit on
+its own port + `--user-data-dir` and drives it over the Chrome DevTools Protocol —
+screenshot, run JS in the page, force a reload — leaving your main window untouched.
+
+```bash
+npm run skill:install   # symlink it into ~/.claude/skills/ (one-time, per machine)
+```
+
+```bash
+# then, from any worktree:
+bash tools/cockpit-probe/scripts/probe.sh launch          # stand up a probe
+bash tools/cockpit-probe/scripts/probe.sh shot out.png    # reload, then screenshot
+bash tools/cockpit-probe/scripts/probe.sh eval "document.title"
+bash tools/cockpit-probe/scripts/probe.sh stop            # tear down just this probe
+```
+
+It's deliberately **not** the ▶ Run button: Run gives a human a persistent window on the
+bookmarkable port with shared state and no debug port; the probe gives an agent a
+throwaway, isolated, CDP-addressable one. See `tools/cockpit-probe/README.md`.
+
 ## Ideas to poke at next
 
 - Move into a Tauri fat client (the UI code doesn't change — see below).
