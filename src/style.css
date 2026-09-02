@@ -786,16 +786,10 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  /* Resting bottom padding = REST_GAP (cockpit.ts): the turn-end settle leaves the
-   * caret REST_GAP above the fold rather than tightening to the bottom (so the view
-   * never bumps UP as a turn ends), and matching that here means dropping the
-   * trailing pad lands the caret in the same place with no clamp. Keep in sync with
-   * REST_GAP. While a turn streams, cockpit.ts appends a trailing spacer child
-   * (beginTrail) for the extra slack the caret floats in — a child, not padding, so
-   * `overflow` contains it instead of it growing the pane. */
-  padding: 18px 16px 100px;
-  /* The follow eases scrollTop itself (rAF easeInOut); CSS smooth scrolling
-   * would fight those per-frame writes, so keep it off. */
+  padding: 18px 16px 24px;
+  /* Auto-follow pins scrollTop directly (see cockpit.ts follow); CSS smooth
+   * scrolling would animate those writes and lag behind the stream, so keep it
+   * off — the pin is meant to be instant. */
   scroll-behavior: auto;
 }
 
