@@ -1180,6 +1180,28 @@ body {
   color: var(--accent);
 }
 
+/* Pulse the glyph while the subagent works, so a row that's mid-flight reads as
+   alive at a glance rather than static between step ticks. */
+.tool.subagent.running .tool-glyph {
+  animation: subagent-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes subagent-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool.subagent.running .tool-glyph {
+    animation: none;
+  }
+}
+
 .tool.subagent .tool-name {
   color: var(--accent);
 }

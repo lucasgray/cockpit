@@ -56,12 +56,18 @@ type Pane = {
   revealTimer: number;
   tools: Map<string, HTMLElement>;
   /** Live subagent rows, keyed by the Task tool_use id, so their inner tool
-   *  calls can be counted onto them as a working heartbeat. */
-  subagents: Map<string, { steps: number; label: HTMLElement }>;
+   *  calls can be counted onto them as a working heartbeat. The row outlives its
+   *  own tool_end — the SDK delivers a subagent's Task tool_result up front,
+   *  before the forwarded inner calls stream in — so the end is stashed here
+   *  (`ended`/`ok`/`detail`) and applied when the turn settles, not on tool_end. */
+  subagents: Map<string, { steps: number; label: HTMLElement; ended?: boolean; ok?: boolean; detail?: string }>;
   todos: HTMLElement | null;
   /** The "thinking" spinner under the prompt (+ its interval), while it thinks. */
   spinner: HTMLElement | null;
   spinnerTimer: number;
+  /** Whether a turn is in flight in this pane — set on the user's prompt, cleared
+   *  on `done`. Gates the working spinner so it never lingers between turns. */
+  turnLive: boolean;
   /** Whether the stored transcript has been replayed into this pane yet. */
   restored: boolean;
 };
@@ -152,6 +158,7 @@ export class Cockpit {
         todos: null,
         spinner: null,
         spinnerTimer: 0,
+        turnLive: false,
         restored: false,
       };
       this.panes.set(key, pane);
@@ -200,6 +207,7 @@ export class Cockpit {
       pane.spinnerTimer = 0;
     }
     pane.spinner = null;
+    pane.turnLive = false;
     pane.el.innerHTML = '';
     pane.bubbleType = null;
     pane.bubbleBody = null;
@@ -351,21 +359,15 @@ export class Cockpit {
    * from the store — same transcript, but nothing live to animate.
    */
   private handle(event: AgentEvent, replaying = false) {
-    // The spinner means "thinking, nothing shown yet" — any real output ends it.
-    if (!replaying && event.type !== 'user' && event.type !== 'thinking') this.stopSpinner();
     switch (event.type) {
       case 'user':
         this.addUser(event.text, event.images ?? []);
-        if (!replaying) this.startSpinner();
         break;
       case 'thinking':
-        // Thinking text is usually omitted (empty). Keep the spinner rather than
-        // open a blank bubble; only draw a bubble when there's real content.
-        if (!event.text.trim()) {
-          if (!replaying) this.ensureSpinner();
-          break;
-        }
-        if (!replaying) this.stopSpinner();
+        // Thinking text is usually omitted (empty). Don't open a blank bubble
+        // for it — the spinner (kept alive by syncSpinner below) is what carries
+        // "thinking, nothing shown yet". Only draw a bubble for real content.
+        if (!event.text.trim()) break;
         this.appendDelta('thinking', event.text, replaying);
         break;
       case 'say':
@@ -415,6 +417,32 @@ export class Cockpit {
       case 'done':
         this.endTurn(event.interrupted);
         break;
+    }
+    // History replays instantly — there's nothing live to spin for.
+    if (!replaying) this.syncSpinner(event);
+  }
+
+  /**
+   * Keep a "working" spinner pinned to the bottom of the transcript for exactly
+   * as long as the agent is churning with nothing visible to show. The old wiring
+   * tore it down on any non-text event and only ever brought it back on an empty
+   * `thinking` delta — so a running tool, and above all a subagent whose forwarded
+   * heartbeat is the only traffic, would sit spinner-less and the pane looked
+   * frozen. Here one rule drives it: spin while the turn is live and the agent is
+   * neither streaming visible text (the typewriter is its own signal) nor blocked
+   * on the operator (a question or plan) nor done.
+   */
+  private syncSpinner(event: AgentEvent) {
+    if (event.type === 'user') this.pane.turnLive = true;
+    else if (event.type === 'done') this.pane.turnLive = false;
+
+    const streamingText = event.type === 'say' || (event.type === 'thinking' && !!event.text.trim());
+    const waitingOnOperator = event.type === 'question' || event.type === 'plan';
+
+    if (this.pane.turnLive && !streamingText && !waitingOnOperator && event.type !== 'done') {
+      this.ensureSpinner();
+    } else {
+      this.stopSpinner();
     }
   }
 
@@ -542,14 +570,29 @@ export class Cockpit {
   private endTool(id: string, ok: boolean, detail?: string) {
     const row = this.pane.tools.get(id);
     if (!row) return;
+    // A subagent's tool_end is its Task tool_result, which the SDK delivers up
+    // front — before the subagent's forwarded inner tool calls stream in as
+    // parented heartbeat events. Settling (and deleting) the row here would
+    // un-fold every one of those late calls: they'd draw as stray rows that tear
+    // the transcript, and the step tally would freeze at zero. So defer it —
+    // stash the outcome, leave the row "working" and in the maps so children
+    // keep folding onto it, and settle every open subagent at endTurn instead.
+    const sub = this.pane.subagents.get(id);
+    if (sub) {
+      sub.ended = true;
+      sub.ok = ok;
+      if (detail) sub.detail = detail;
+      return;
+    }
     this.pane.tools.delete(id);
+    this.settleTool(row, ok, detail);
+  }
+
+  /** Flip a finished tool row from running to its ✓/✘ state and hang its output
+   *  body off it (unless the row opens a file on click instead of expanding). */
+  private settleTool(row: HTMLElement, ok: boolean, detail?: string) {
     row.classList.remove('running');
     row.classList.add(ok ? 'ok' : 'failed');
-    // A subagent row settles to "done" with the count it reached.
-    if (this.pane.subagents.has(id)) {
-      this.paintSubagent(id, true);
-      this.pane.subagents.delete(id);
-    }
     // An openable row's click opens the file, not the raw result — skip
     // building an expandable body it can never be clicked open to reveal.
     if (detail && !row.classList.contains('openable')) {
@@ -697,6 +740,19 @@ export class Cockpit {
     // Stop means stop: typing dumps its remaining text instead of playing on.
     if (interrupted) this.fastForward = true;
     this.closeBubble();
+    // Settle the subagent rows whose tool_end we deferred so their forwarded
+    // heartbeat could keep folding: paint the final count and land the ✓/✘ and
+    // report body now. A subagent that never saw its end (interrupted before the
+    // Task returned) settles as failed, like any other cut-off tool.
+    for (const [id, sub] of this.pane.subagents) {
+      this.paintSubagent(id, true);
+      const row = this.pane.tools.get(id);
+      if (row) {
+        this.pane.tools.delete(id);
+        this.settleTool(row, sub.ended ? sub.ok ?? true : false, sub.detail);
+      }
+    }
+    this.pane.subagents.clear();
     // Any tool still marked running was cut off — don't leave it spinning.
     for (const row of this.pane.tools.values()) {
       row.classList.remove('running');
@@ -776,8 +832,19 @@ export class Cockpit {
     }, 80);
   }
 
+  /**
+   * Show the spinner, or — if it's already going — move it back below whatever
+   * content just landed so it stays the last thing in the transcript. Moving the
+   * node keeps the animation running; recreating it would reset the frame on
+   * every step and read as a stutter rather than a steady spin.
+   */
   private ensureSpinner() {
-    if (!this.pane.spinner) this.startSpinner();
+    if (this.pane.spinner) {
+      this.pane.el.appendChild(this.pane.spinner);
+      this.scrollDown();
+      return;
+    }
+    this.startSpinner();
   }
 
   private stopSpinner() {
