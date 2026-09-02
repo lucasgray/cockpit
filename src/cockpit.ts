@@ -38,6 +38,17 @@ const REVEAL_FADE_MS = 280;
  *  settled to plain text — so the animated window stays small and cheap even as
  *  the whole bubble re-renders each tick. */
 const REVEAL_FADE_WINDOW = 24;
+/** Typewriter cadence: reveal this many chars per tick as a steady baseline, so a
+ *  bubble types at a constant rate rather than lurching with the network's chunk
+ *  boundaries — a single-char delta no longer flashes and freezes. */
+const REVEAL_STEP = 2;
+/** Chars the reveal is allowed to trail the received text before it stops pacing
+ *  and accelerates to catch up. Below this, the drain holds the steady REVEAL_STEP
+ *  cadence; above it (a flood, or a backlog piled up while occluded) the step
+ *  jumps to pull the lag back to this cap, so catch-up lands in ~0.7s rather than
+ *  dribbling for seconds. It also bounds the tail a closing bubble finishes on its
+ *  own clock (see `closeBubble`). */
+const REVEAL_MAX_LAG = 90;
 /** Chunky follow: don't start chasing until the caret has drifted this far (px)
  *  below its resting line. Small reveals type in place; only a real chunk earns a
  *  chase, so slow typing reads as deliberate overscroll-typewriter-overscroll
@@ -47,12 +58,12 @@ const CHUNK_TRIGGER = 48;
 /** Where the caret (bottom of the newest content) rests once the chase catches
  *  up: this far (px) above the viewport bottom, so the live text is always in
  *  view with room beneath it to type into. Must exceed CHUNK_TRIGGER so the
- *  caret's whole drift band stays above the fold. */
+ *  caret's whole drift band stays above the fold. The turn-end settle leaves the
+ *  caret right here (see `settleDown`) rather than tightening to the bottom, so
+ *  the transcript never bumps UP as a turn ends — which means the resting
+ *  `.transcripts` bottom padding is kept equal to this value, so dropping the
+ *  trailing pad lands the caret in the same spot with no clamp. Keep them in sync. */
 const REST_GAP = 100;
-/** Where the caret settles once the turn is over — just breathing room above the
- *  bottom, matching the collapsed `.transcripts` padding so dropping the trailing
- *  pad afterwards is invisible. */
-const SETTLE_GAP = 24;
 /** Fraction of the remaining caret distance the chase closes per 16ms frame — a
  *  critically-damped approach, so scrollTop eases toward the live target and
  *  self-adjusts as text floods or dribbles. Re-read every frame (unlike a
@@ -244,8 +255,16 @@ export class Cockpit {
    */
   private draw(pane: Pane, animate = false) {
     if (!pane.bubbleBody) return;
-    pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText.slice(0, pane.bubbleShown));
-    if (animate) this.fadeInTail(pane.bubbleBody);
+    this.drawInto(pane.bubbleBody, pane.bubbleText, pane.bubbleShown, animate);
+  }
+
+  /** Render `shown` chars of `text` into a specific bubble body. Split out from
+   *  `draw` so a bubble detached from the pane slot (a close that finishes typing
+   *  on its own clock, see `drainDetached`) can keep rendering into its own node
+   *  after `pane.bubbleBody` has moved on to the next bubble. */
+  private drawInto(body: HTMLElement, text: string, shown: number, animate: boolean) {
+    body.innerHTML = renderMarkdown(text.slice(0, shown));
+    if (animate) this.fadeInTail(body);
   }
 
   /**
@@ -294,19 +313,51 @@ export class Cockpit {
    * still pending is drawn first: a replay loop never yields to a frame, so the
    * scheduled render might otherwise land after the bubble had been let go.
    */
-  private closeBubble() {
+  private closeBubble(snap = false) {
     const pane = this.pane;
-    // Snap the typewriter to the end so a bubble never freezes half-revealed.
     if (pane.revealTimer) {
       clearTimeout(pane.revealTimer);
       pane.revealTimer = 0;
     }
-    pane.bubbleShown = pane.bubbleText.length;
-    if (pane.bubbleBody) this.draw(pane);
+    // A bubble that's still mid-reveal finishes typing on its own clock rather
+    // than snapping to full — otherwise a type switch, a tool row, or a plan
+    // makes the open text jump to completion with no typewriter (the "instant
+    // chunk" jitter). `snap` forces the old instant behaviour where the reveal
+    // must not play on: an operator turn, an error, or the turn ending (whose
+    // settle wants a stable final height). A bubble already fully revealed, or
+    // with no body, has nothing to drain and is torn down at once regardless.
+    const body = pane.bubbleBody;
+    if (body) {
+      if (snap || pane.bubbleShown >= pane.bubbleText.length) {
+        pane.bubbleShown = pane.bubbleText.length;
+        this.draw(pane);
+      } else {
+        this.drainDetached(pane, body, pane.bubbleText, pane.bubbleShown);
+      }
+    }
     pane.bubbleType = null;
     pane.bubbleBody = null;
     pane.bubbleText = '';
     pane.bubbleShown = 0;
+  }
+
+  /** Finish typing a bubble that's been let go of the pane slot: it keeps its own
+   *  captured text/index and self-schedules to completion, so the next bubble can
+   *  claim the slot and stream immediately while this one types out its tail. The
+   *  tail is bounded by REVEAL_MAX_LAG, so it never lags more than a beat. Stops
+   *  if the node is torn out of the DOM (a pane wipe), so a `/clear` mid-drain
+   *  leaves no orphaned timer painting a detached node. */
+  private drainDetached(pane: Pane, body: HTMLElement, text: string, shown: number) {
+    const animate = pane === this.visible;
+    const step = () => {
+      if (!body.isConnected) return;
+      const remaining = text.length - shown;
+      if (remaining <= 0) return;
+      shown = Math.min(text.length, shown + Math.max(REVEAL_STEP, remaining - REVEAL_MAX_LAG));
+      this.drawInto(body, text, shown, animate);
+      if (shown < text.length) window.setTimeout(step, TICK_MS);
+    };
+    window.setTimeout(step, TICK_MS);
   }
 
   /** Drop a pane's drawn transcript and every live handle into it. */
@@ -532,7 +583,7 @@ export class Cockpit {
         }
         break;
       case 'error':
-        this.closeBubble();
+        this.closeBubble(true);
         this.addMessage('error').textContent = `⚠ ${event.message}`;
         break;
       case 'done':
@@ -638,15 +689,28 @@ export class Cockpit {
       // glides rather than snaps. dt-scaled, so the cap holds at any frame rate.
       const cap = MAX_CHASE_STEP * (dt / 16);
       const step = Math.max(-cap, Math.min(cap, dist * k));
+      const before = el.scrollTop;
       this.setScroll(el.scrollTop + step);
-      // Caught up and holding (content stopped growing) — end the chase.
-      if (Math.abs(dist) < 1.5 && ++stable >= 3) {
-        this.chaseRaf = 0;
-        if (flourish) this.bounce(then);
-        else then?.();
-        return;
+      const moved = Math.abs(el.scrollTop - before);
+      // End when the chase is at rest — either caught up (content stopped
+      // growing), OR unable to make progress: near the target the step can fall
+      // below the browser's scrollTop rounding granularity, so scrollTop never
+      // actually moves and `dist` never crosses the 1.5px line. That spun the
+      // rAF forever — the settle never dropped the trailing pad (dead space +
+      // stranded scroll) and the live chaseRaf blocked `follow`, freezing auto-
+      // follow until the next turn. Treating "can't move" as settled ends it.
+      // (Also lands the short-content case, where scrollTop is pinned at 0/max.)
+      const atRest = Math.abs(dist) < 1.5 || moved < 0.5;
+      if (atRest) {
+        if (++stable >= 3) {
+          this.chaseRaf = 0;
+          if (flourish) this.bounce(then);
+          else then?.();
+          return;
+        }
+      } else {
+        stable = 0;
       }
-      if (Math.abs(dist) >= 1.5) stable = 0;
       this.chaseRaf = requestAnimationFrame(tick);
     };
     this.chaseRaf = requestAnimationFrame(tick);
@@ -683,11 +747,51 @@ export class Cockpit {
     if (!this.autoFollow || document.hidden) return this.snapBottom();
     if (this.chaseRaf) cancelAnimationFrame(this.chaseRaf), (this.chaseRaf = 0);
     if (this.bounceRaf) cancelAnimationFrame(this.bounceRaf), (this.bounceRaf = 0);
-    // Chase (re-reading the caret, so a late reflow can't leave it clipped) down
-    // to the settle line, finish with the overscroll flourish, then drop the pad.
-    // The caret is already resting at SETTLE_GAP above the bottom, so collapsing
-    // the (below-the-fold) pad leaves it exactly there — no hard snap to jump.
-    this.chase(SETTLE_GAP, true, () => this.endTrail());
+    this.settleDown();
+  }
+
+  /**
+   * End of turn: leave the caret exactly where it streamed and drop the pad.
+   *
+   * DOWN-ONLY. The transcript must never scroll UP to settle — an upward "bump"
+   * as a turn ends (after a fast burst fills the screen) reads as broken. So the
+   * caret is only ever eased DOWN, and only if the turn ended with it still below
+   * its rest line (a burst the chase hadn't caught up to yet); if it's already at
+   * or above the line, nothing moves at all. The resting `.transcripts` bottom
+   * padding equals REST_GAP, so once the caret is at rest, dropping the (below-
+   * the-fold) trailing pad lands it in exactly the same place — no clamp, no jump.
+   * Re-reads the caret each frame, so a late reflow can't leave the last line
+   * clipped. Mirrors `chase`'s stuck-detection (`moved < 0.5`) so a sub-pixel
+   * residual can't spin the rAF forever.
+   */
+  private settleDown() {
+    const el = this.conversations;
+    let last = 0;
+    let stable = 0;
+    const tick = (now: number) => {
+      if (this.pane !== this.visible || !this.autoFollow) return void (this.chaseRaf = 0);
+      const dt = last ? Math.min(64, now - last) : 16;
+      last = now;
+      // Positive = caret below its rest line (still catching up); clamp to >= 0 so
+      // a caret already at/above rest is never pulled upward.
+      const down = Math.max(0, this.caretY() - (el.clientHeight - REST_GAP));
+      const k = 1 - Math.pow(1 - CHASE_RATE, dt / 16);
+      const step = Math.min(MAX_CHASE_STEP * (dt / 16), down * k);
+      const before = el.scrollTop;
+      this.setScroll(el.scrollTop + step);
+      const moved = el.scrollTop - before;
+      if (down < 1.5 || moved < 0.5) {
+        if (++stable >= 3) {
+          this.chaseRaf = 0;
+          this.endTrail();
+          return;
+        }
+      } else {
+        stable = 0;
+      }
+      this.chaseRaf = requestAnimationFrame(tick);
+    };
+    this.chaseRaf = requestAnimationFrame(tick);
   }
 
   /** Un-tether the content bottom: TRAIL_VIEWPORTS of trailing slack so the caret
@@ -784,7 +888,7 @@ export class Cockpit {
    * turn that carried four of them doesn't push the conversation off the screen.
    */
   private addUser(text: string, images: TranscriptImage[] = []) {
-    this.closeBubble();
+    this.closeBubble(true);
     const wrap = this.addMessage('user');
 
     if (images.length) {
@@ -1057,7 +1161,10 @@ export class Cockpit {
   private endTurn(interrupted?: boolean) {
     // Stop means stop: typing dumps its remaining text instead of playing on.
     if (interrupted) this.fastForward = true;
-    this.closeBubble();
+    // Snap: the turn is over, so the final text lands complete before `settle`
+    // eases the caret down against a now-stable height (a live drain would fight
+    // the pad drop). Interrupt already means stop-means-stop.
+    this.closeBubble(true);
     // Settle the subagent rows whose tool_end we deferred so their forwarded
     // heartbeat could keep folding: paint the final count and land the ✓/✘ and
     // report body now. A subagent that never saw its end (interrupted before the
@@ -1128,7 +1235,11 @@ export class Cockpit {
       pane.revealTimer = 0;
       const remaining = pane.bubbleText.length - pane.bubbleShown;
       if (remaining <= 0) return;
-      pane.bubbleShown += Math.max(2, Math.ceil(remaining / 30));
+      // Steady cadence: REVEAL_STEP chars/tick, so the reveal reads as a constant
+      // typewriter decoupled from how the deltas actually arrived. Only once the
+      // backlog exceeds REVEAL_MAX_LAG does the step grow, pulling the lag back to
+      // the cap — a flood catches up in ~0.7s without the reveal ever snapping.
+      pane.bubbleShown += Math.max(REVEAL_STEP, remaining - REVEAL_MAX_LAG);
       if (pane.bubbleShown > pane.bubbleText.length) pane.bubbleShown = pane.bubbleText.length;
       // Only the on-screen pane's glyphs are worth animating; a background run
       // just fills its text in (it'll be settled by the time it's shown).

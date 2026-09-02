@@ -13,11 +13,15 @@
 // Subcommands:
 //   screenshot <out.png> [--no-reload]   reload (default) then capture a PNG
 //   eval "<js>"                          Runtime.evaluate, returnByValue + awaitPromise
+//   eval-file <path.js>                  run a JS file (driver.js prepended), no escaping
 //   reload                               Page.reload + wait for load
 //   pageport                             print the live page's location.port (health)
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SELF_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const PROBE_DIR = process.env.PROBE_DIR;
 if (!PROBE_DIR) fail('PROBE_DIR is not set (run this via probe.sh, not directly)');
@@ -125,6 +129,23 @@ async function withPage(fn) {
   }
 }
 
+// Evaluate one expression in the page and print its JSON value. awaitPromise so an
+// async IIFE resolves before we read it; returnByValue so we get plain JSON back.
+async function evaluate(expression) {
+  await withPage(async (cdp) => {
+    await cdp.send('Runtime.enable');
+    const { result, exceptionDetails } = await cdp.send('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (exceptionDetails) {
+      fail(exceptionDetails.exception?.description || exceptionDetails.text || 'evaluation threw');
+    }
+    console.log(JSON.stringify(result.value ?? null, null, 2));
+  });
+}
+
 // Reload and block until the load event fires (or a timeout), so renderer edits show
 // through vite's deliberate hmr:false. Then a short settle for the first paint.
 async function reload(cdp) {
@@ -150,18 +171,28 @@ if (cmd === 'screenshot') {
 } else if (cmd === 'eval') {
   const expression = rest.join(' ');
   if (!expression) fail('eval needs a JS expression');
-  await withPage(async (cdp) => {
-    await cdp.send('Runtime.enable');
-    const { result, exceptionDetails } = await cdp.send('Runtime.evaluate', {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-    });
-    if (exceptionDetails) {
-      fail(exceptionDetails.exception?.description || exceptionDetails.text || 'evaluation threw');
-    }
-    console.log(JSON.stringify(result.value ?? null, null, 2));
-  });
+  await evaluate(expression);
+} else if (cmd === 'eval-file') {
+  // Run a JS file in the page — no shell-escaping of backticks/$ / template literals,
+  // and the cockpit-probe driver (driver.js) is prepended so the script can call
+  // turn()/stream()/snapshot()/poll() against window.__cockpit. Wrapped in an async
+  // IIFE, so the file may use top-level `await` and `return` a JSON result.
+  const file = rest.find((a) => !a.startsWith('--'));
+  if (!file) fail('eval-file needs a path to a .js file');
+  let userSrc;
+  try {
+    userSrc = readFileSync(file, 'utf8');
+  } catch (e) {
+    fail(`cannot read ${file}: ${e.message}`);
+  }
+  let driverSrc = '';
+  try {
+    driverSrc = readFileSync(path.join(SELF_DIR, 'driver.js'), 'utf8');
+  } catch (e) {
+    fail(`cannot read the probe driver (${path.join(SELF_DIR, 'driver.js')}): ${e.message}`);
+  }
+  const expression = `(async () => {\n${driverSrc}\n/* ---- user script: ${file} ---- */\n${userSrc}\n})()`;
+  await evaluate(expression);
 } else if (cmd === 'reload') {
   await withPage(async (cdp) => {
     await reload(cdp);
@@ -179,5 +210,5 @@ if (cmd === 'screenshot') {
     console.log(result.value ?? '');
   });
 } else {
-  fail(`unknown command: ${cmd || '(none)'} — expected screenshot|eval|reload|pageport`);
+  fail(`unknown command: ${cmd || '(none)'} — expected screenshot|eval|eval-file|reload|pageport`);
 }

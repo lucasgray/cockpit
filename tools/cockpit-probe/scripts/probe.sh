@@ -21,6 +21,7 @@
 #   probe.sh status                 print probe.json + a live health check
 #   probe.sh shot [out.png] [--no-reload]   reload (default) then screenshot; prints path
 #   probe.sh eval "<js>"            Runtime.evaluate, returnByValue + awaitPromise
+#   probe.sh eval-file <path.js>    run a JS file (driver.js prepended); no shell escaping
 #   probe.sh reload                 reload the page (pick up renderer edits, no capture)
 #   probe.sh stop                   tear down THIS probe's process trees + tmp dir
 #
@@ -201,6 +202,17 @@ cmd_launch() {
 
   cd "$ROOT"
 
+  # 0. deps. The cockpit installs node_modules on worktrees IT creates (electron/main.ts
+  #    worktreeCreateHook), but a harness-made worktree (.claude/worktrees/...) skips that,
+  #    so a first probe here would find no vite. Install once, up front, if it's missing.
+  if [ ! -x "./node_modules/.bin/vite" ]; then
+    echo "  node_modules missing — running npm install (first launch in this worktree)..."
+    if ! npm install >"$DIR/npm-install.log" 2>&1; then
+      echo "npm install failed — see $DIR/npm-install.log" >&2
+      exit 1
+    fi
+  fi
+
   # 1. vite (its config reads COCKPIT_PORT via resolvePort; host 127.0.0.1, strictPort).
   detach "$DIR/vite.log" env COCKPIT_PORT="$vport" ./node_modules/.bin/vite
   local vpid=$DETACHED_PID
@@ -281,6 +293,15 @@ cmd_eval() {
   node "$CDP" eval "$@"
 }
 
+# Run a JS file in the page with the driver (turn/stream/snapshot/poll) prepended.
+# Write plain JS to a file and pass its path — no shell-escaping of backticks/$.
+cmd_evalfile() {
+  ensure_probe_or_die
+  [ $# -gt 0 ] || { echo 'usage: probe.sh eval-file <path.js>' >&2; exit 1; }
+  [ -f "$1" ] || { echo "eval-file: no such file: $1" >&2; exit 1; }
+  node "$CDP" eval-file "$@"
+}
+
 cmd_reload() {
   ensure_probe_or_die
   node "$CDP" reload
@@ -314,14 +335,15 @@ cmd_stop() {
 # ---------------------------------------------------------------------------
 
 case "${1:-}" in
-  launch) shift; cmd_launch "$@" ;;
-  status) shift; cmd_status "$@" ;;
-  shot)   shift; cmd_shot "$@" ;;
-  eval)   shift; cmd_eval "$@" ;;
-  reload) shift; cmd_reload "$@" ;;
-  stop)   shift; cmd_stop "$@" ;;
+  launch)    shift; cmd_launch "$@" ;;
+  status)    shift; cmd_status "$@" ;;
+  shot)      shift; cmd_shot "$@" ;;
+  eval)      shift; cmd_eval "$@" ;;
+  eval-file) shift; cmd_evalfile "$@" ;;
+  reload)    shift; cmd_reload "$@" ;;
+  stop)      shift; cmd_stop "$@" ;;
   *)
-    echo "usage: probe.sh <launch|status|shot|eval|reload|stop>" >&2
+    echo "usage: probe.sh <launch|status|shot|eval|eval-file|reload|stop>" >&2
     exit 2
     ;;
 esac
