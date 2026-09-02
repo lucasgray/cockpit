@@ -61,6 +61,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <section class="conversation">
         <div class="transcripts" id="conversation"></div>
         <div class="composer" id="composer">
+          <div class="queued" id="queued" hidden></div>
           <div class="attachments" id="attachments" hidden></div>
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
@@ -110,6 +111,7 @@ const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
 const composer = document.getElementById('composer') as HTMLElement;
 const attachmentTray = document.getElementById('attachments') as HTMLElement;
+const queuedTray = document.getElementById('queued') as HTMLElement;
 const thinkingBtn = document.getElementById('thinking') as HTMLButtonElement;
 const planBtn = document.getElementById('plan') as HTMLButtonElement;
 const agentSettingsBtn = document.getElementById('agent-settings') as HTMLButtonElement;
@@ -364,6 +366,8 @@ const rail = new WorktreeRail(
     void restoreOpenFiles(wt);
     // Send/Stop speak for the selected worktree — refresh them on every switch.
     updateSendStop();
+    // The queue strip is per-worktree too — bring back this one's waiting messages.
+    paintQueued();
     // Picking a worktree is the start of typing at it — go straight to the box.
     promptInput.focus();
   },
@@ -382,10 +386,14 @@ const rail = new WorktreeRail(
       void setPlanWorktree(null);
       void setAgentWorktree(null);
       updateSendStop();
+      // The queue belonged to a directory that's gone — clear the strip with it.
+      paintQueued();
     }
     cockpit.dropPane(path);
     drafts.delete(path);
     saveDraft(path);
+    // Whatever was lined up at this worktree goes with the worktree.
+    queued.delete(path);
     restoredWorktrees.delete(path);
     fileTree.dropWorktree(path);
     fileView.dropWorktree(path);
@@ -519,8 +527,56 @@ window.setInterval(() => void rail.refresh(), 5000);
 
 /** Worktrees with a turn in flight. Runs are per-worktree and concurrent. */
 const runningCwds = new Set<string>();
+/**
+ * Messages typed at a worktree while its turn was still running. Rather than
+ * being blocked until the turn lands, they line up here and replay in order the
+ * moment it finishes — so you can read ahead, queue the next few steps, and let
+ * them play out. Per-worktree, like the transcript and the draft: a queue at a
+ * background worktree waits its own turn, untouched by what's on screen.
+ */
+type QueuedMessage = { prompt: string; images: PastedImage[] };
+const queued = new Map<string, QueuedMessage[]>();
 /** Interval repainting the rail's +/- + dirty dots while any run is going. */
 let statsPoll = 0;
+
+/**
+ * Repaint the queued-message strip for the *active* worktree. Each pill is one
+ * message waiting to play back, in the order it'll go; its ✕ pulls it out of the
+ * line. Only ever shows the worktree on screen — the others keep their queues.
+ */
+function paintQueued() {
+  const cwd = activeWorktree?.path;
+  const line = (cwd && queued.get(cwd)) || [];
+  queuedTray.replaceChildren();
+  queuedTray.hidden = line.length === 0;
+  line.forEach((msg, i) => {
+    const pill = document.createElement('div');
+    pill.className = 'queued-item';
+    pill.title = msg.prompt;
+
+    const label = document.createElement('span');
+    label.className = 'queued-text';
+    // A screenshot queued on its own has no words to show — name it by what it is.
+    label.textContent =
+      msg.prompt || (msg.images.length ? `🖼 ${msg.images.length} image${msg.images.length === 1 ? '' : 's'}` : '');
+    pill.append(label);
+
+    const drop = document.createElement('button');
+    drop.className = 'queued-drop';
+    drop.textContent = '×';
+    drop.title = 'Remove from queue';
+    drop.addEventListener('click', () => {
+      const cur = cwd ? queued.get(cwd) : null;
+      cur?.splice(i, 1);
+      if (cur && !cur.length && cwd) queued.delete(cwd);
+      paintQueued();
+      promptInput.focus();
+    });
+    pill.append(drop);
+
+    queuedTray.append(pill);
+  });
+}
 
 /**
  * Reflect the *active* worktree's run state on Send/Stop. Runs are per-worktree,
@@ -531,10 +587,13 @@ let statsPoll = 0;
 function updateSendStop() {
   if (!window.cockpit?.agent) return;
   const busy = !!activeWorktree && runningCwds.has(activeWorktree.path);
+  const hasText = !!promptInput.value.trim() || attachments.length > 0;
   sendBtn.disabled = !activeWorktree;
-  sendBtn.textContent = busy ? '■' : 'Send';
-  sendBtn.classList.toggle('primary', !busy);
-  sendBtn.classList.toggle('stop', busy);
+  // Idle, the button sends. Mid-turn it splits by what's in the box: something
+  // typed queues behind the running turn, an empty box is the ■ that stops it.
+  sendBtn.textContent = busy ? (hasText ? 'Queue' : '■') : 'Send';
+  sendBtn.classList.toggle('primary', !busy || hasText);
+  sendBtn.classList.toggle('stop', busy && !hasText);
 }
 
 /**
@@ -962,6 +1021,9 @@ let attachments: PastedImage[] = [];
 function paintAttachments() {
   attachmentTray.replaceChildren();
   attachmentTray.hidden = attachments.length === 0;
+  // A screenshot alone is a sendable prompt, so the tray changing can flip the
+  // button between ■ and Queue mid-turn just as typing does.
+  updateSendStop();
 
   for (const image of attachments) {
     const chip = document.createElement('div');
@@ -1081,17 +1143,40 @@ async function sendPrompt() {
   // Each worktree has its own live session; several can run at once, each
   // unspooling into its own transcript whether or not it's on screen.
   const cwd = activeWorktree.path;
-  if (runningCwds.has(cwd)) return; // that worktree's turn is still going
   // Sent, so there's no draft left here — clear it in the store too, or coming
   // back to this worktree would hand back a prompt already in the transcript.
+  // This runs whether the message goes out now or joins the queue: either way
+  // it's left the box.
   promptInput.value = '';
   drafts.set(cwd, '');
   saveDraft(cwd);
-  // Handed to this turn, so a paste during it starts the next prompt's tray
-  // rather than joining one already in flight.
+  // Handed off, so a paste after this starts the next prompt's tray rather than
+  // joining one already sent or queued.
   const images = attachments;
   attachments = [];
   paintAttachments();
+
+  // That worktree's turn is still going — line this up to play back when it
+  // lands rather than dropping it. Several can stack; they replay in order.
+  if (runningCwds.has(cwd)) {
+    const line = queued.get(cwd) ?? [];
+    line.push({ prompt, images });
+    queued.set(cwd, line);
+    paintQueued();
+    updateSendStop();
+    return;
+  }
+
+  void startTurn(cwd, prompt, images);
+}
+
+/**
+ * Run one turn against a worktree, then play back whatever queued behind it. The
+ * prompt and images come in as arguments rather than off the composer, because a
+ * drained turn replays a message captured earlier — possibly at a worktree other
+ * than the one now on screen, whose box must be left alone.
+ */
+async function startTurn(cwd: string, prompt: string, images: PastedImage[]) {
   runningCwds.add(cwd);
   rail.setRunning(cwd, true);
   updateSendStop();
@@ -1111,17 +1196,31 @@ async function sendPrompt() {
     void refreshModels();
     updateSendStop();
     syncStatsPoll();
+    // Anything typed while this ran has been waiting — send the next one now. It
+    // drains the one behind it in turn when it finishes, so the whole line plays
+    // out one after another without blocking on this callback.
+    const line = queued.get(cwd);
+    const next = line?.shift();
+    if (!line?.length) queued.delete(cwd);
+    if (activeWorktree?.path === cwd) paintQueued();
+    if (next) void startTurn(cwd, next.prompt, next.images);
   }
 }
 
 sendBtn.addEventListener('click', () => {
-  if (activeWorktree && runningCwds.has(activeWorktree.path)) {
-    window.cockpit?.agent.interrupt(activeWorktree.path);
+  const cwd = activeWorktree?.path;
+  const busy = !!cwd && runningCwds.has(cwd);
+  // Mid-turn with an empty box the button stops the turn; with something typed
+  // it queues that instead, matching what Enter does. Idle, it just sends.
+  if (busy && !promptInput.value.trim() && !attachments.length) {
+    window.cockpit?.agent.interrupt(cwd!);
   } else {
     sendPrompt();
   }
 });
 promptInput.addEventListener('input', noteDraft);
+// Typing while a turn runs flips the button between Queue and ■ — keep it live.
+promptInput.addEventListener('input', updateSendStop);
 // Clicking away is the moment a draft is most likely to be abandoned for a
 // while — land it now rather than trusting the debounce to outlive the window.
 promptInput.addEventListener('blur', () => {
