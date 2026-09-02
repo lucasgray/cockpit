@@ -786,9 +786,14 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 16px 24px;
-  /* scrollDown() sets scrollTop; smooth makes each new turn ease into view. */
-  scroll-behavior: smooth;
+  /* Resting padding = 24 breathing room + OVERSCROLL (14) reserved for the final
+   * settle's bounce. While a turn streams, cockpit.ts appends a trailing spacer
+   * child (beginTrail) for the extra slack the caret floats in — a child, not
+   * padding, so `overflow` contains it instead of it growing the pane. */
+  padding: 18px 16px 38px;
+  /* The follow eases scrollTop itself (rAF easeInOut); CSS smooth scrolling
+   * would fight those per-frame writes, so keep it off. */
+  scroll-behavior: auto;
 }
 
 /* Panes stay mounted so a worktree swap never loses an in-flight turn. */
@@ -1149,6 +1154,34 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.6;
+}
+
+/* Typewriter reveal: each freshly-typed glyph eases up from below and fades in.
+ * fadeInTail() wraps only the trailing glyphs and seeks each with a negative
+ * animation-delay. The span stays a plain *inline* box (not inline-block) so it
+ * is transparent to line-breaking: wrapping happens on the text, exactly as it
+ * would with no spans, so glyphs entering/leaving the fade window never shift a
+ * wrap point (which is what jittered). The rise is `top` on a relatively-
+ * positioned inline element — a paint-only offset — since `transform` can't
+ * apply to an inline box. Duration is kept in sync with REVEAL_FADE_MS. */
+@keyframes tw-in {
+  from {
+    opacity: 0;
+    top: 0.45em;
+  }
+  to {
+    opacity: 1;
+    top: 0;
+  }
+}
+.tw-in {
+  position: relative;
+  animation: tw-in 280ms ease-in both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tw-in {
+    animation: none;
+  }
 }
 
 /* Tool rows: collapsed = one-line command + status; click to expand output. */

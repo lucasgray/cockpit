@@ -28,6 +28,54 @@ const MAX_CHUNK = 24;
 const EDIT_BUDGET_MS = 6_000;
 /** Ceiling for all typing in one turn. Later edits snap in once it's spent. */
 const TURN_BUDGET_MS = 20_000;
+/** How close to the bottom (px) still counts as "following the stream", so the
+ *  operator has to scroll back to within this slack to re-lock auto-follow. */
+const FOLLOW_SLACK = 32;
+/** Per-glyph reveal: each freshly-typed character eases up from below and fades
+ *  in over this long (kept in sync with the `tw-in` keyframe in style.css). */
+const REVEAL_FADE_MS = 280;
+/** How many trailing glyphs are mid-fade at once. A glyph older than this is
+ *  settled to plain text — so the animated window stays small and cheap even as
+ *  the whole bubble re-renders each tick. */
+const REVEAL_FADE_WINDOW = 24;
+/** Chunky follow: don't start chasing until the caret has drifted this far (px)
+ *  below its resting line. Small reveals type in place; only a real chunk earns a
+ *  chase, so slow typing reads as deliberate overscroll-typewriter-overscroll
+ *  beats rather than a per-tick creep. Once chasing, the caret is tracked
+ *  continuously (a fast burst never waits for the next chunk). */
+const CHUNK_TRIGGER = 48;
+/** Where the caret (bottom of the newest content) rests once the chase catches
+ *  up: this far (px) above the viewport bottom, so the live text is always in
+ *  view with room beneath it to type into. Must exceed CHUNK_TRIGGER so the
+ *  caret's whole drift band stays above the fold. */
+const REST_GAP = 100;
+/** Where the caret settles once the turn is over — just breathing room above the
+ *  bottom, matching the collapsed `.transcripts` padding so dropping the trailing
+ *  pad afterwards is invisible. */
+const SETTLE_GAP = 24;
+/** Fraction of the remaining caret distance the chase closes per 16ms frame — a
+ *  critically-damped approach, so scrollTop eases toward the live target and
+ *  self-adjusts as text floods or dribbles. Re-read every frame (unlike a
+ *  time-based ease), it tracks a moving target without ever overshooting, which
+ *  is what keeps a reflowing bubble smooth instead of jittery. */
+const CHASE_RATE = 0.22;
+/** Ceiling on how fast the chase scrolls (px per 16ms frame). The exponential
+ *  alone would take a huge first step to close a big backlog — smooth on paper
+ *  but a jarring zoom on screen. Capping the speed turns a long catch-up into a
+ *  deliberate glide that then eases in, without slowing the common short hops. */
+const MAX_CHASE_STEP = 64;
+/** Duration of the overscroll bounce that flourishes a caught-up chase. */
+const BOUNCE_MS = 200;
+/** How far (px) the content rubber-bands past the resting line when a chase
+ *  catches up, before easing back. While a turn is live the bounce scrolls into
+ *  the trailing pad; the collapsed `.transcripts` padding reserves it for the
+ *  final settle too, so the overshoot is always a real scroll, never a clamp. */
+const OVERSCROLL = 14;
+/** Trailing slack added below the content while a turn streams (as a spacer
+ *  child, see `beginTrail`), as a multiple of the viewport, so the caret always
+ *  floats and a fast burst can never push scrollTop to the max — which is what
+ *  bottomed the follow out and jittered. */
+const TRAIL_VIEWPORTS = 1.5;
 
 type Pos = { lineNumber: number; column: number };
 
@@ -105,6 +153,29 @@ export class Cockpit {
   /** Whether the current edit was too big to type, for the status line. */
   private appliedWhole = false;
 
+  /** While true, the transcript pins to the bottom as the agent types. The
+   *  operator scrolling up releases it (they take over); scrolling back to the
+   *  bottom, or the next turn starting, re-locks it. See `onScroll`. */
+  private autoFollow = true;
+  /** Last seen scrollTop, to tell an operator's upward scroll (which releases
+   *  auto-follow) from our own downward pins (which never should). */
+  private lastScrollTop = 0;
+  /** The exact scrollTop we last wrote ourselves. `onScroll` ignores an event
+   *  landing here — only a gesture the operator made lands somewhere else — so
+   *  our own glides and the upward settle of the bounce never read as a takeover. */
+  private writtenTop = 0;
+  /** rAF handle for the in-flight caret chase (0 = idle). */
+  private chaseRaf = 0;
+  /** rAF handle for the in-flight overscroll bounce (0 = idle). */
+  private bounceRaf = 0;
+  /** Whether the large trailing pad is applied. It un-tethers the content bottom
+   *  from `scrollHeight` while a turn streams, so growing text never shifts a
+   *  hop's captured target underneath it. Dropped when the turn settles, the
+   *  operator takes over, or the pane switches. See `beginTrail`/`endTrail`. */
+  private trailOn = false;
+  /** The trailing-slack element (see `beginTrail`), reused across turns. */
+  private trailSpacer: HTMLElement | null = null;
+
   /** A Read/Edit/Write/MultiEdit row was clicked — open that file in the File pane. */
   private onOpenFile: (cwd: string, path: string) => void;
   /** A plan was approved in the transcript — let the composer leave plan mode. */
@@ -117,6 +188,7 @@ export class Cockpit {
     this.onOpenFile = onOpenFile;
     this.onPlanApproved = onPlanApproved;
     this.conversations = document.getElementById('conversation')!;
+    this.conversations.addEventListener('scroll', () => this.onScroll());
     this.status = document.getElementById('status')!;
     const diffContainer = document.getElementById('diff')!;
 
@@ -170,9 +242,50 @@ export class Cockpit {
    * Markdown renders from the bubble's whole (revealed) source, because a delta
    * that closes a fence or starts a list changes blocks already on screen.
    */
-  private draw(pane: Pane) {
-    if (pane.bubbleBody) {
-      pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText.slice(0, pane.bubbleShown));
+  private draw(pane: Pane, animate = false) {
+    if (!pane.bubbleBody) return;
+    pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText.slice(0, pane.bubbleShown));
+    if (animate) this.fadeInTail(pane.bubbleBody);
+  }
+
+  /**
+   * Fade the freshly-revealed tail in, one glyph at a time — each eases up from
+   * below (see the `tw-in` keyframe). The markdown is re-rendered whole every
+   * tick, so we can't just append: instead we wrap the last REVEAL_FADE_WINDOW
+   * glyphs and seek each one — via a negative `animation-delay` set from its
+   * distance back from the caret — to where its fade should be. A glyph drifts
+   * back through the window as more text arrives and is plain, settled text by
+   * the time it leaves, so its animation reads as continuous across re-renders.
+   * Whitespace stays unwrapped, so word wrapping and line breaks are unaffected.
+   */
+  private fadeInTail(root: HTMLElement) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const texts: Text[] = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n as Text);
+    let rank = 0; // 0 = the caret-most glyph, counting back through the window.
+    for (let t = texts.length - 1; t >= 0 && rank < REVEAL_FADE_WINDOW; t--) {
+      const node = texts[t];
+      const data = node.data;
+      const take = Math.min(REVEAL_FADE_WINDOW - rank, data.length);
+      const splitAt = data.length - take;
+      const frag = document.createDocumentFragment();
+      if (splitAt > 0) frag.append(document.createTextNode(data.slice(0, splitAt)));
+      for (let i = splitAt; i < data.length; i++) {
+        const ch = data[i];
+        // Rank climbs right→left: the rightmost (newest) glyph is the least aged.
+        const r = rank + (data.length - 1 - i);
+        if (/\s/.test(ch)) {
+          frag.append(document.createTextNode(ch));
+          continue;
+        }
+        const span = document.createElement('span');
+        span.className = 'tw-in';
+        span.textContent = ch;
+        span.style.animationDelay = `${-(r / REVEAL_FADE_WINDOW) * REVEAL_FADE_MS}ms`;
+        frag.append(span);
+      }
+      node.replaceWith(frag);
+      rank += take;
     }
   }
 
@@ -252,7 +365,11 @@ export class Cockpit {
     // at once, so clear it on switch. The now-visible run rebuilds it on its next
     // edit, and the Changes tab is the reliable per-worktree view meanwhile.
     this.resetDiff();
-    this.scrollDown();
+    // A freshly-shown conversation follows the stream again; the shared scroll
+    // position doesn't carry a per-pane offset to restore anyway. Snap (not
+    // glide) so the pane appears already at the bottom, not scrolling toward it.
+    this.autoFollow = true;
+    this.snapBottom();
   }
 
   /**
@@ -361,6 +478,10 @@ export class Cockpit {
   private handle(event: AgentEvent, replaying = false) {
     switch (event.type) {
       case 'user':
+        // A new turn re-locks auto-follow: even if the operator had scrolled up
+        // to read the last turn, their message and the reply that follows snap
+        // back into view. (Only the on-screen conversation, not a background run.)
+        if (this.pane === this.visible) this.autoFollow = true;
         this.addUser(event.text, event.images ?? []);
         break;
       case 'thinking':
@@ -446,10 +567,207 @@ export class Cockpit {
     }
   }
 
+  /** A discrete new row (a turn, a tool, a plan) — glide to the bottom now,
+   *  regardless of how little it added. Streaming reveals use `follow(false)`. */
   private scrollDown() {
+    this.follow(true);
+  }
+
+  /**
+   * Chunky auto-follow, anchored to the caret (the bottom of the newest content)
+   * rather than to `scrollHeight`. While a turn streams, a large trailing pad
+   * (see `beginTrail`) floats the content bottom in slack, so a fast burst can
+   * never shove scrollTop to the max — which is what bottomed the old follow out
+   * and jittered. The caret is meant to rest REST_GAP above the fold; once it has
+   * drifted CHUNK_TRIGGER past that line we start a chase, so slow typing reads as
+   * deliberate overscroll-typewriter-overscroll beats. `force` (discrete rows)
+   * starts on any drift, not just a chunk.
+   */
+  private follow(force: boolean) {
     // Only the visible pane is on screen; a background run must not yank scroll.
     if (this.pane !== this.visible) return;
-    this.conversations.scrollTop = this.conversations.scrollHeight;
+    // The operator scrolled up to read — leave their position alone until they
+    // return to the bottom or the next turn re-locks follow.
+    if (!this.autoFollow) return;
+    // Occluded windows get no rAF frames (see revealTick), so an eased chase
+    // would freeze mid-scroll — snap instead, so returning to the window shows
+    // the tail rather than a stalled position.
+    if (document.hidden) return this.snapBottom();
+    // A chase is already running — it re-reads the caret every frame, so it's
+    // already tracking whatever just arrived. A bounce re-checks on settle.
+    if (this.chaseRaf || this.bounceRaf) return;
+    const el = this.conversations;
+    // How far the caret has drifted below its resting line.
+    const overshoot = this.caretY() - (el.clientHeight - REST_GAP);
+    if (overshoot <= (force ? 0.5 : CHUNK_TRIGGER)) return;
+    this.beginTrail();
+    this.chase(REST_GAP, true);
+  }
+
+  /** The caret's Y within the viewport: distance (px) from the top of the visible
+   *  area to the bottom of the newest message. Rect-based, so it's immune to the
+   *  trailing pad — unlike `scrollHeight`, which the pad inflates. */
+  private caretY(): number {
+    const last = this.pane.el.lastElementChild as HTMLElement | null;
+    if (!last) return 0;
+    return last.getBoundingClientRect().bottom - this.conversations.getBoundingClientRect().top;
+  }
+
+  /**
+   * Exponential-smoothing chase: each frame, move scrollTop a fixed fraction
+   * (CHASE_RATE, frame-rate corrected) of the way toward putting the caret `gap`
+   * px above the viewport bottom. The target is re-read every frame from the
+   * live caret, so a bubble reflowing underneath is tracked smoothly — the
+   * approach is monotonic and never overshoots, which is precisely what a
+   * time-based ease against a moving target could not do (it lurched). When the
+   * caret has sat on its line for a few frames (the stream paused or ended) the
+   * chase ends: `flourish` finishes with an overscroll bounce, else `then` runs.
+   */
+  private chase(gap: number, flourish: boolean, then?: () => void) {
+    let last = 0;
+    let stable = 0;
+    const tick = (now: number) => {
+      // Released, or switched away — abandon the chase.
+      if (this.pane !== this.visible || !this.autoFollow) return void (this.chaseRaf = 0);
+      const el = this.conversations;
+      const dt = last ? Math.min(64, now - last) : 16;
+      last = now;
+      const dist = this.caretY() - (el.clientHeight - gap);
+      const k = 1 - Math.pow(1 - CHASE_RATE, dt / 16);
+      // Exponential step, capped to a deliberate top speed so a big backlog
+      // glides rather than snaps. dt-scaled, so the cap holds at any frame rate.
+      const cap = MAX_CHASE_STEP * (dt / 16);
+      const step = Math.max(-cap, Math.min(cap, dist * k));
+      this.setScroll(el.scrollTop + step);
+      // Caught up and holding (content stopped growing) — end the chase.
+      if (Math.abs(dist) < 1.5 && ++stable >= 3) {
+        this.chaseRaf = 0;
+        if (flourish) this.bounce(then);
+        else then?.();
+        return;
+      }
+      if (Math.abs(dist) >= 1.5) stable = 0;
+      this.chaseRaf = requestAnimationFrame(tick);
+    };
+    this.chaseRaf = requestAnimationFrame(tick);
+  }
+
+  /** The overscroll flourish: content rubber-bands OVERSCROLL px past where the
+   *  chase settled and eases back, a there-and-back sine so it lands with no
+   *  discontinuity. The overshoot lives in the trailing pad, so it never exceeds
+   *  the scroll max — no clamp. `then` runs on settle (default: re-check for a
+   *  chunk that piled up during the bounce). */
+  private bounce(then?: () => void) {
+    const base = this.conversations.scrollTop;
+    let t0 = 0;
+    const tick = (now: number) => {
+      if (this.pane !== this.visible || !this.autoFollow) return void (this.bounceRaf = 0);
+      if (!t0) t0 = now;
+      const q = Math.min(1, (now - t0) / BOUNCE_MS);
+      this.setScroll(base + OVERSCROLL * Math.sin(Math.PI * q));
+      if (q < 1) return void (this.bounceRaf = requestAnimationFrame(tick));
+      this.bounceRaf = 0;
+      this.setScroll(base);
+      then ? then() : this.follow(false);
+    };
+    this.bounceRaf = requestAnimationFrame(tick);
+  }
+
+  /** The turn is over: chase the caret down to its natural resting line (just
+   *  breathing room above the bottom) so the *full* final text lands cleanly in
+   *  view, then drop the trailing pad and pin exactly — invisibly, since the pad
+   *  is all below the fold once the caret has settled there. */
+  private settle() {
+    if (this.pane !== this.visible || !this.trailOn) return;
+    // Released or occluded — no chase to run; just collapse the pad in place.
+    if (!this.autoFollow || document.hidden) return this.snapBottom();
+    if (this.chaseRaf) cancelAnimationFrame(this.chaseRaf), (this.chaseRaf = 0);
+    if (this.bounceRaf) cancelAnimationFrame(this.bounceRaf), (this.bounceRaf = 0);
+    // Chase (re-reading the caret, so a late reflow can't leave it clipped) down
+    // to the settle line, finish with the overscroll flourish, then drop the pad.
+    // The caret is already resting at SETTLE_GAP above the bottom, so collapsing
+    // the (below-the-fold) pad leaves it exactly there — no hard snap to jump.
+    this.chase(SETTLE_GAP, true, () => this.endTrail());
+  }
+
+  /** Un-tether the content bottom: TRAIL_VIEWPORTS of trailing slack so the caret
+   *  floats and a fast burst can never push scrollTop to the max. A spacer *child*
+   *  of the scroll container — NOT `padding-bottom`, which escapes the flex/grid
+   *  sizing and grows the pane, shoving the composer off screen; a child is
+   *  contained by `overflow` exactly as message content is. It sits after the
+   *  panes, so `caretY` (which reads inside the pane) never measures it.
+   *  Idempotent for the life of a turn. */
+  private beginTrail() {
+    if (this.trailOn) return;
+    this.trailOn = true;
+    const el = this.conversations;
+    if (!this.trailSpacer) {
+      this.trailSpacer = document.createElement('div');
+      this.trailSpacer.setAttribute('aria-hidden', 'true');
+    }
+    this.trailSpacer.style.height = `${Math.round(el.clientHeight * TRAIL_VIEWPORTS)}px`;
+    el.appendChild(this.trailSpacer);
+  }
+
+  /** Drop the trailing spacer back to the CSS resting state. */
+  private endTrail() {
+    if (!this.trailOn) return;
+    this.trailOn = false;
+    this.trailSpacer?.remove();
+  }
+
+  /** Jump straight to the natural bottom — for pane switches, occluded windows,
+   *  and the exact landing after a settle chase. Drops the trailing pad first so
+   *  "bottom" means the content's bottom, not the pad's. */
+  private snapBottom() {
+    if (this.chaseRaf) cancelAnimationFrame(this.chaseRaf), (this.chaseRaf = 0);
+    if (this.bounceRaf) cancelAnimationFrame(this.bounceRaf), (this.bounceRaf = 0);
+    this.endTrail();
+    const el = this.conversations;
+    this.setScroll(el.scrollHeight - el.clientHeight - OVERSCROLL);
+  }
+
+  /** Every programmatic scroll goes through here so `writtenTop` records the
+   *  landed (clamped/rounded) value — that's how `onScroll` tells our writes
+   *  apart from a real operator gesture. */
+  private setScroll(v: number) {
+    const el = this.conversations;
+    el.scrollTop = v;
+    this.writtenTop = el.scrollTop;
+    this.lastScrollTop = this.writtenTop;
+  }
+
+  /**
+   * The transcript follows the stream while the agent types. The moment the
+   * operator scrolls up, they take over: auto-follow releases and their position
+   * holds until they scroll back to the bottom or the next turn re-locks it (see
+   * the `user` case in `handle` and `showPane`).
+   *
+   * An event that lands where we last wrote is our own glide/bounce and is
+   * ignored; anything else is the operator, so an upward move hands them the
+   * scroll (and kills any in-flight glide) and a return to the bottom re-locks.
+   */
+  private onScroll() {
+    const el = this.conversations;
+    const top = el.scrollTop;
+    if (Math.abs(top - this.writtenTop) <= 1.5) {
+      // Our own programmatic scroll — not a takeover.
+      this.lastScrollTop = top;
+      return;
+    }
+    if (top < this.lastScrollTop - 1) {
+      // Scrolled up — hand the operator the scroll and stop chasing. Collapse the
+      // trailing pad too, so "bottom" (for re-locking below) means the content's
+      // bottom rather than a viewport of slack they'd have to scroll through.
+      this.autoFollow = false;
+      if (this.chaseRaf) cancelAnimationFrame(this.chaseRaf), (this.chaseRaf = 0);
+      if (this.bounceRaf) cancelAnimationFrame(this.bounceRaf), (this.bounceRaf = 0);
+      this.endTrail();
+    } else if (el.scrollHeight - top - el.clientHeight <= FOLLOW_SLACK) {
+      // Back at the bottom — resume following the stream.
+      this.autoFollow = true;
+    }
+    this.lastScrollTop = top;
   }
 
   private addMessage(cls: string): HTMLElement {
@@ -762,6 +1080,9 @@ export class Cockpit {
 
     // Like CC desktop: a normal turn just ends. Only surface an interrupt.
     if (interrupted) this.addMessage('turn-end').textContent = 'Stopped';
+
+    // Turn's done: ease the caret down to the natural bottom and drop the pad.
+    this.settle();
   }
 
   private appendDelta(type: 'thinking' | 'say', text: string, instant = false) {
@@ -809,10 +1130,15 @@ export class Cockpit {
       if (remaining <= 0) return;
       pane.bubbleShown += Math.max(2, Math.ceil(remaining / 30));
       if (pane.bubbleShown > pane.bubbleText.length) pane.bubbleShown = pane.bubbleText.length;
-      this.draw(pane);
-      // This pane may be a background run — only follow scroll if it's on screen.
-      if (pane === this.visible) this.conversations.scrollTop = this.conversations.scrollHeight;
-      if (pane.bubbleShown < pane.bubbleText.length) pane.revealTimer = window.setTimeout(step, 16);
+      // Only the on-screen pane's glyphs are worth animating; a background run
+      // just fills its text in (it'll be settled by the time it's shown).
+      this.draw(pane, pane === this.visible);
+      // Chunky follow: let the reveal pile up, then glide to catch it (follow()
+      // guards the visible-pane and auto-follow checks itself). The final tick of
+      // a burst forces a settle, so no sub-chunk slack is left once it drains.
+      const done = pane.bubbleShown >= pane.bubbleText.length;
+      if (pane === this.visible) this.follow(done);
+      if (!done) pane.revealTimer = window.setTimeout(step, 16);
     };
     pane.revealTimer = window.setTimeout(step, 16);
   }
