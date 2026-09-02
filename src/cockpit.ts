@@ -1057,8 +1057,18 @@ export class Cockpit {
       clearInterval(pane.spinnerTimer);
       pane.spinnerTimer = 0;
     }
+    const hadSpinner = !!pane.spinner;
     pane.spinner?.remove();
     pane.spinner = null;
+    // Pulling the spinner shrinks scrollHeight, so the browser clamps scrollTop
+    // and fires an async scroll event. Re-pin (following) or at least refresh
+    // writtenTop (not) so onScroll reads that clamp as our own write — otherwise
+    // the first thinking block that replaces the spinner is misread as an
+    // operator scroll-up and silently drops follow.
+    if (hadSpinner && pane === this.visible) {
+      if (this.autoFollow) this.snapBottom();
+      else this.setScroll(this.conversations.scrollTop);
+    }
   }
 
   /**
