@@ -253,12 +253,22 @@ export class Cockpit {
     if (this.visible === pane) this.showPane('default');
   }
 
-  /** Full teardown of the visible transcript plus the diff surface. */
-  reset() {
-    this.blankPane(this.visible);
-    this.visible.restored = true;
-    window.cockpit?.store.clearTranscript(this.visible.key);
-    this.resetDiff();
+  /**
+   * Full teardown of a worktree's transcript plus the diff surface. Defaults to
+   * the visible pane (the `/clear` path), but takes a key so the rail's "Reset
+   * session" button can clear a worktree that isn't currently on screen.
+   */
+  reset(key: string = this.visible.key) {
+    const pane = this.panes.get(key);
+    if (pane) {
+      this.blankPane(pane);
+      // A cleared pane must not replay its now-deleted events if reopened.
+      pane.restored = true;
+    }
+    window.cockpit?.store.clearTranscript(key);
+    // The diff surface is shared and shows the visible worktree — only wipe it
+    // when the worktree being reset is the one on screen.
+    if (key === this.visible.key) this.resetDiff();
   }
 
   /** Queue diff work behind whatever is still typing, dropping stale generations. */

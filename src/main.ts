@@ -311,6 +311,23 @@ window.cockpit?.run.onEvent(({ cwd, status }) => {
   reportRun(cwd, status);
 });
 
+/**
+ * Start a fresh session for a worktree: drop its half-written draft, tear down
+ * the SDK conversation and wipe the app's own stored transcript. Shared by the
+ * `/clear` command and the rail's "Reset session" button, which can target a
+ * worktree that isn't on screen — hence keyed on `cwd` throughout.
+ */
+function resetSession(cwd: string) {
+  drafts.set(cwd, '');
+  saveDraft(cwd);
+  // Only blank the live composer if it's showing this worktree — resetting a
+  // background one mustn't wipe what's being typed at the active one.
+  if (activeWorktree?.path === cwd) promptInput.value = '';
+  window.cockpit?.agent.reset(cwd);
+  cockpit.reset(cwd);
+  setStatusLine('Session cleared — next prompt starts fresh.');
+}
+
 const rail = new WorktreeRail(
   railWorktrees,
   (wt) => {
@@ -368,6 +385,7 @@ const rail = new WorktreeRail(
   // transcript even while another worktree is on screen — same routing a
   // background agent turn's events take.
   (cwd, event) => cockpit.handleEvent(cwd, event),
+  (path) => resetSession(path),
 );
 
 /**
@@ -971,14 +989,7 @@ async function sendPrompt() {
 
   if (prompt === '/clear') {
     promptInput.value = '';
-    if (activeWorktree) {
-      const cwd = activeWorktree.path;
-      drafts.set(cwd, '');
-      saveDraft(cwd);
-      window.cockpit?.agent.reset(cwd);
-      cockpit.reset();
-      setStatusLine('Session cleared — next prompt starts fresh.');
-    }
+    if (activeWorktree) resetSession(activeWorktree.path);
     return;
   }
 
