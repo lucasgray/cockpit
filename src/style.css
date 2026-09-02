@@ -786,13 +786,10 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  /* Resting padding = 24 breathing room + OVERSCROLL (14) reserved for the final
-   * settle's bounce. While a turn streams, cockpit.ts appends a trailing spacer
-   * child (beginTrail) for the extra slack the caret floats in — a child, not
-   * padding, so `overflow` contains it instead of it growing the pane. */
-  padding: 18px 16px 38px;
-  /* The follow eases scrollTop itself (rAF easeInOut); CSS smooth scrolling
-   * would fight those per-frame writes, so keep it off. */
+  padding: 18px 16px 24px;
+  /* Auto-follow pins scrollTop directly (see cockpit.ts follow); CSS smooth
+   * scrolling would animate those writes and lag behind the stream, so keep it
+   * off — the pin is meant to be instant. */
   scroll-behavior: auto;
 }
 
