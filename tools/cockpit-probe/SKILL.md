@@ -17,10 +17,10 @@ description: >-
 
 Verifying a cockpit change means *looking at the rendered window*, and the main window
 is off-limits. This skill stands up a throwaway cockpit for the **current worktree**,
-isolated on its own ports and `--user-data-dir`, and gives you four verbs over the
-Chrome DevTools Protocol: **shot**, **eval**, **reload**, **stop**. All plumbing (free
-port scan, detached launch, electron build, raw CDP WebSocket) is inside the scripts —
-you run one command per action.
+isolated on its own ports and `--user-data-dir`, and gives you five verbs over the
+Chrome DevTools Protocol: **shot**, **eval**, **eval-file**, **reload**, **stop**. All
+plumbing (free port scan, `npm install` if the worktree has none, detached launch,
+electron build, raw CDP WebSocket) is inside the scripts — you run one command per action.
 
 ## Why a probe, and the three hard rules it encodes
 
@@ -50,17 +50,20 @@ bash ~/.claude/skills/cockpit-probe/scripts/probe.sh launch
 ```
 
 `launch` is **idempotent**: if a healthy probe for this worktree is already up, it
-reuses it; otherwise it picks a free vite port (>=5900) and CDP port (>=9222), starts
-vite detached, builds the electron main, launches electron with the debug + user-data
-switches, waits for the page target, and writes `probe.json`. Do **not** wrap it in a
-Claude Code `run_in_background` task — the probe is detached on purpose so it outlives
-the tool call; run the script in the foreground with the sandbox disabled.
+reuses it; otherwise it runs `npm install` when the worktree has no `node_modules` (a
+harness-made `.claude/worktrees/...` skips the cockpit's own install hook), picks a free
+vite port (>=5900) and CDP port (>=9222), starts vite detached, builds the electron main,
+launches electron with the debug + user-data switches, waits for the page target, and
+writes `probe.json`. Do **not** wrap it in a Claude Code `run_in_background` task — the
+probe is detached on purpose so it outlives the tool call; run the script in the
+foreground with the sandbox disabled.
 
 ```bash
 bash ~/.claude/skills/cockpit-probe/scripts/probe.sh status                 # probe.json + live health
 bash ~/.claude/skills/cockpit-probe/scripts/probe.sh shot [out.png]         # reload, then screenshot
 bash ~/.claude/skills/cockpit-probe/scripts/probe.sh shot out.png --no-reload   # capture the CURRENT frame
 bash ~/.claude/skills/cockpit-probe/scripts/probe.sh eval "document.title"  # run JS in the page
+bash ~/.claude/skills/cockpit-probe/scripts/probe.sh eval-file repro.js     # run a JS file (driver prepended)
 bash ~/.claude/skills/cockpit-probe/scripts/probe.sh reload                 # reload only (pick up edits)
 bash ~/.claude/skills/cockpit-probe/scripts/probe.sh stop                   # tear down THIS probe
 ```
@@ -86,6 +89,39 @@ probe.sh eval "(el => el.scrollHeight > el.clientHeight)(document.querySelector(
 JSON-serializable values and awaits promises. It's the general escape hatch — reach for
 it whenever a screenshot can't answer the question.
 
+## Driving synthetic turns (`eval-file` + the driver)
+
+To exercise streaming/scroll behaviour you need to feed the transcript real agent
+events. Rather than escaping a long one-liner through the shell (backticks and `$`
+fight bash), write plain JS to a file and run it with **`eval-file`** — it prepends
+`scripts/driver.js`, which exposes a small vocabulary against the DEV-only
+`window.__cockpit` handle (`src/main.ts`, gated to probe instances). The script runs
+inside an async IIFE, so it can `await` and `return` a JSON result:
+
+```js
+// repro.js — reproduce & measure the end-of-turn settle
+await turn({ user: 'q1', say: paragraph(26) });   // user -> stream say -> done, awaits settle
+return snapshot();                                 // { scrollTop, trail, chase, autoFollow, msgs, ... }
+```
+
+```bash
+probe.sh eval-file repro.js
+```
+
+Driver vocabulary: `feed(event)`, `stream(type,text,opts)`, `turn({user,thinking,say})`,
+`paragraph(lines)`, `snapshot()`, `caretY()`, `poll(fn,n,interval)`, `sleep(ms)`, plus
+the raw `p` (controller) and `conv` (scroll container). Event shapes are `AgentEvent`
+(`src/agent/protocol.ts`). `poll()` is how you watch a settle converge frame by frame:
+
+```js
+// watch the trailing pad drop and the chase stop after a turn ends
+await turn({ user: 'q1', say: paragraph(26), settle: 0 });
+return await poll(() => ({ top: Math.round(conv.scrollTop), trail: !!p.trailOn, chase: !!p.chaseRaf }), 12, 100);
+```
+
+`window.__cockpit` only exists in a DEV build on the probe's port range, so `eval-file`
+scripts run against a probe, never the main cockpit.
+
 ## When done
 
 `stop` SIGTERM→SIGKILLs the probe's recorded electron and vite process trees (matched by
@@ -105,4 +141,6 @@ single source of truth, so edit it there. See `tools/cockpit-probe/README.md`.
   kill), mirrors the `restart-dev-stack` conventions.
 - `scripts/cdp.mjs` — zero-dependency Node CDP driver (Node 22+ global `WebSocket` +
   `fetch`); holds the safety rail that refuses to attach to anything but this probe.
+- `scripts/driver.js` — in-page helper vocabulary (`turn`/`stream`/`snapshot`/`poll`/…)
+  prepended to every `eval-file` script; drives the DEV-only `window.__cockpit` handle.
 - `install.mjs` — symlinks this dir into `~/.claude/skills/` (`npm run skill:install`).

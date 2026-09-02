@@ -106,6 +106,15 @@ const cockpit = new Cockpit(
   // so its next turn carries the plan out instead of drafting another.
   (cwd) => clearPlanFor(cwd),
 );
+// Dev-only handle for the cockpit-probe driver (tools/cockpit-probe): lets a probe
+// drive synthetic turns and read scroll/reveal state over CDP without hand-editing
+// this file. Gated to probe instances — DEV builds on the probe's high vite port
+// range (>=5900, see probe.sh VITE_BASE) — so it never appears in the main cockpit
+// or a worktree dev instance (5273-5472), and is stripped from production entirely
+// by import.meta.env.DEV.
+if (import.meta.env.DEV && Number(location.port) >= 5900) {
+  (window as unknown as { __cockpit: typeof cockpit }).__cockpit = cockpit;
+}
 const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
@@ -515,7 +524,6 @@ rail.load();
 void window.cockpit?.store.railView().then((view) => {
   if (view === 'explorer') showRailView(view);
 });
-updateSendStop();
 
 // A branch name can change out from under us — a commit lands, the agent
 // checks out a new branch, or the user does it from a terminal — with no event
@@ -1245,3 +1253,10 @@ promptInput.addEventListener('keydown', (e) => {
     togglePlan();
   }
 });
+
+// Paint the initial Send/Stop state once at boot. This has to live at the very
+// end of module init: updateSendStop() reads runningCwds and attachments, both
+// declared further down the file, so calling it any earlier lands in their
+// temporal dead zone and throws in the desktop app (the browser's no-bridge
+// early return hid it). Keep it last.
+updateSendStop();

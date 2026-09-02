@@ -38,6 +38,17 @@ const REVEAL_FADE_MS = 280;
  *  settled to plain text — so the animated window stays small and cheap even as
  *  the whole bubble re-renders each tick. */
 const REVEAL_FADE_WINDOW = 24;
+/** Typewriter cadence: reveal this many chars per tick as a steady baseline, so a
+ *  bubble types at a constant rate rather than lurching with the network's chunk
+ *  boundaries — a single-char delta no longer flashes and freezes. */
+const REVEAL_STEP = 2;
+/** Chars the reveal is allowed to trail the received text before it stops pacing
+ *  and accelerates to catch up. Below this, the drain holds the steady REVEAL_STEP
+ *  cadence; above it (a flood, or a backlog piled up while occluded) the step
+ *  jumps to pull the lag back to this cap, so catch-up lands in ~0.7s rather than
+ *  dribbling for seconds. It also bounds the tail a closing bubble finishes on its
+ *  own clock (see `closeBubble`). */
+const REVEAL_MAX_LAG = 90;
 
 type Pos = { lineNumber: number; column: number };
 
@@ -195,8 +206,16 @@ export class Cockpit {
    */
   private draw(pane: Pane, animate = false) {
     if (!pane.bubbleBody) return;
-    pane.bubbleBody.innerHTML = renderMarkdown(pane.bubbleText.slice(0, pane.bubbleShown));
-    if (animate) this.fadeInTail(pane.bubbleBody);
+    this.drawInto(pane.bubbleBody, pane.bubbleText, pane.bubbleShown, animate);
+  }
+
+  /** Render `shown` chars of `text` into a specific bubble body. Split out from
+   *  `draw` so a bubble detached from the pane slot (a close that finishes typing
+   *  on its own clock, see `drainDetached`) can keep rendering into its own node
+   *  after `pane.bubbleBody` has moved on to the next bubble. */
+  private drawInto(body: HTMLElement, text: string, shown: number, animate: boolean) {
+    body.innerHTML = renderMarkdown(text.slice(0, shown));
+    if (animate) this.fadeInTail(body);
   }
 
   /**
@@ -245,19 +264,51 @@ export class Cockpit {
    * still pending is drawn first: a replay loop never yields to a frame, so the
    * scheduled render might otherwise land after the bubble had been let go.
    */
-  private closeBubble() {
+  private closeBubble(snap = false) {
     const pane = this.pane;
-    // Snap the typewriter to the end so a bubble never freezes half-revealed.
     if (pane.revealTimer) {
       clearTimeout(pane.revealTimer);
       pane.revealTimer = 0;
     }
-    pane.bubbleShown = pane.bubbleText.length;
-    if (pane.bubbleBody) this.draw(pane);
+    // A bubble that's still mid-reveal finishes typing on its own clock rather
+    // than snapping to full — otherwise a type switch, a tool row, or a plan
+    // makes the open text jump to completion with no typewriter (the "instant
+    // chunk" jitter). `snap` forces the old instant behaviour where the reveal
+    // must not play on: an operator turn, an error, or the turn ending. A bubble
+    // already fully revealed, or with no body, has nothing to drain and is torn
+    // down at once regardless.
+    const body = pane.bubbleBody;
+    if (body) {
+      if (snap || pane.bubbleShown >= pane.bubbleText.length) {
+        pane.bubbleShown = pane.bubbleText.length;
+        this.draw(pane);
+      } else {
+        this.drainDetached(pane, body, pane.bubbleText, pane.bubbleShown);
+      }
+    }
     pane.bubbleType = null;
     pane.bubbleBody = null;
     pane.bubbleText = '';
     pane.bubbleShown = 0;
+  }
+
+  /** Finish typing a bubble that's been let go of the pane slot: it keeps its own
+   *  captured text/index and self-schedules to completion, so the next bubble can
+   *  claim the slot and stream immediately while this one types out its tail. The
+   *  tail is bounded by REVEAL_MAX_LAG, so it never lags more than a beat. Stops
+   *  if the node is torn out of the DOM (a pane wipe), so a `/clear` mid-drain
+   *  leaves no orphaned timer painting a detached node. */
+  private drainDetached(pane: Pane, body: HTMLElement, text: string, shown: number) {
+    const animate = pane === this.visible;
+    const step = () => {
+      if (!body.isConnected) return;
+      const remaining = text.length - shown;
+      if (remaining <= 0) return;
+      shown = Math.min(text.length, shown + Math.max(REVEAL_STEP, remaining - REVEAL_MAX_LAG));
+      this.drawInto(body, text, shown, animate);
+      if (shown < text.length) window.setTimeout(step, TICK_MS);
+    };
+    window.setTimeout(step, TICK_MS);
   }
 
   /** Drop a pane's drawn transcript and every live handle into it. */
@@ -483,7 +534,7 @@ export class Cockpit {
         }
         break;
       case 'error':
-        this.closeBubble();
+        this.closeBubble(true);
         this.addMessage('error').textContent = `⚠ ${event.message}`;
         break;
       case 'done':
@@ -607,7 +658,7 @@ export class Cockpit {
    * turn that carried four of them doesn't push the conversation off the screen.
    */
   private addUser(text: string, images: TranscriptImage[] = []) {
-    this.closeBubble();
+    this.closeBubble(true);
     const wrap = this.addMessage('user');
 
     if (images.length) {
@@ -880,7 +931,8 @@ export class Cockpit {
   private endTurn(interrupted?: boolean) {
     // Stop means stop: typing dumps its remaining text instead of playing on.
     if (interrupted) this.fastForward = true;
-    this.closeBubble();
+    // Snap: the turn is over, so the final text lands complete at once.
+    this.closeBubble(true);
     // Settle the subagent rows whose tool_end we deferred so their forwarded
     // heartbeat could keep folding: paint the final count and land the ✓/✘ and
     // report body now. A subagent that never saw its end (interrupted before the
@@ -951,7 +1003,11 @@ export class Cockpit {
       pane.revealTimer = 0;
       const remaining = pane.bubbleText.length - pane.bubbleShown;
       if (remaining <= 0) return;
-      pane.bubbleShown += Math.max(2, Math.ceil(remaining / 30));
+      // Steady cadence: REVEAL_STEP chars/tick, so the reveal reads as a constant
+      // typewriter decoupled from how the deltas actually arrived. Only once the
+      // backlog exceeds REVEAL_MAX_LAG does the step grow, pulling the lag back to
+      // the cap — a flood catches up in ~0.7s without the reveal ever snapping.
+      pane.bubbleShown += Math.max(REVEAL_STEP, remaining - REVEAL_MAX_LAG);
       if (pane.bubbleShown > pane.bubbleText.length) pane.bubbleShown = pane.bubbleText.length;
       // Only the on-screen pane's glyphs are worth animating; a background run
       // just fills its text in (it'll be settled by the time it's shown).
