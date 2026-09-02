@@ -492,6 +492,9 @@ app.whenReady().then(() => {
         thinking: store.thinking(req.cwd),
         model: store.model(req.cwd) || store.settings().model,
         effort: store.effort(req.cwd),
+        // The ◈ Plan toggle wins when it's on; otherwise the turn runs under the
+        // cockpit's own default permission mode.
+        permissionMode: store.planMode(req.cwd) ? 'plan' : store.settings().permissionMode,
       };
       return runAgent({ ...req, ...config }, (agentEvent: AgentEvent) => {
         store.appendEvent(req.cwd, agentEvent);
@@ -553,6 +556,10 @@ app.whenReady().then(() => {
   ipcMain.handle('store:thinking', (_event, cwd: string) => getStore().thinking(cwd));
   ipcMain.handle('store:setThinking', (_event, cwd: string, on: boolean) =>
     getStore().setThinking(cwd, on),
+  );
+  ipcMain.handle('store:planMode', (_event, cwd: string) => getStore().planMode(cwd));
+  ipcMain.handle('store:setPlanMode', (_event, cwd: string, on: boolean) =>
+    getStore().setPlanMode(cwd, on),
   );
   ipcMain.handle('store:model', (_event, cwd: string) => getStore().model(cwd));
   ipcMain.handle('store:setModel', (_event, cwd: string, model: string) =>

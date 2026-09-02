@@ -211,6 +211,13 @@ export type CockpitBridge = {
     thinking: (cwd: string) => Promise<boolean>;
     setThinking: (cwd: string, on: boolean) => Promise<void>;
     /**
+     * Whether each worktree is in plan mode — the composer's ◈ Plan toggle. Read
+     * at turn start like thinking mode; the main process turns it into the turn's
+     * permission mode, and the renderer clears it once a plan is approved.
+     */
+    planMode: (cwd: string) => Promise<boolean>;
+    setPlanMode: (cwd: string, on: boolean) => Promise<void>;
+    /**
      * The model and effort each worktree is pinned to — the composer's other two
      * switchers, read at turn start exactly like thinking mode. '' means
      * unpinned: the turn falls back to the cockpit's settings, then to the CLI.

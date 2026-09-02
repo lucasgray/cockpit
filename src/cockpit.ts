@@ -4,7 +4,6 @@ import { storedImageUrl } from './images';
 import type {
   AgentEvent,
   EditOp,
-  PlanItem,
   QuestionSpec,
   TodoItem,
   TranscriptImage,
@@ -102,9 +101,15 @@ export class Cockpit {
 
   /** A Read/Edit/Write/MultiEdit row was clicked — open that file in the File pane. */
   private onOpenFile: (cwd: string, path: string) => void;
+  /** A plan was approved in the transcript — let the composer leave plan mode. */
+  private onPlanApproved: (cwd: string) => void;
 
-  constructor(onOpenFile: (cwd: string, path: string) => void) {
+  constructor(
+    onOpenFile: (cwd: string, path: string) => void,
+    onPlanApproved: (cwd: string) => void,
+  ) {
     this.onOpenFile = onOpenFile;
+    this.onPlanApproved = onPlanApproved;
     this.conversations = document.getElementById('conversation')!;
     this.status = document.getElementById('status')!;
     const diffContainer = document.getElementById('diff')!;
@@ -367,7 +372,7 @@ export class Cockpit {
         this.appendDelta('say', event.text, replaying);
         break;
       case 'plan':
-        this.renderPlan(event.title, event.items);
+        this.renderPlan(event.id, event.text, replaying);
         break;
       case 'tool_start':
         this.startTool(event.id, event.name, event.summary, event.detail, event.parent);
@@ -785,34 +790,62 @@ export class Cockpit {
     pane.spinner = null;
   }
 
-  private renderPlan(title: string, items: PlanItem[]) {
+  /**
+   * The agent's plan, from ExitPlanMode, awaiting approval. Like renderQuestion,
+   * the turn is blocked in the SDK until answer() feeds a decision back, so the
+   * buttons stay live until the operator picks. Approve lets the turn carry the
+   * plan out (and clears the composer's ◈ Plan toggle); Reject sends it back to
+   * revise, keeping the session in plan mode.
+   */
+  private renderPlan(id: string, text: string, replaying = false) {
     this.closeBubble();
+    const cwd = this.pane.key;
     const wrap = this.addMessage('plan');
+
     const heading = document.createElement('div');
     heading.className = 'plan-title';
-    heading.textContent = `◈ ${title}`;
+    heading.textContent = '◈ Plan';
     wrap.append(heading);
 
-    for (const [i, item] of items.entries()) {
-      const row = document.createElement('div');
-      row.className = 'plan-item';
-      const head = document.createElement('div');
-      head.className = 'plan-item-head';
-      head.textContent = `${i + 1}. ${item.text}`;
-      row.append(head);
-      if (item.snippet) {
-        const snip = document.createElement('div');
-        snip.className = 'snippet';
-        row.append(snip);
-        // The row is placed synchronously; fill in highlighting once it's ready
-        // (keeping renderPlan itself synchronous, so handleEvent stays atomic).
-        const { code, lang } = item.snippet;
-        void monaco.editor.colorize(code, lang, {}).then((html) => {
-          snip.innerHTML = html;
-        });
-      }
-      wrap.append(row);
+    const body = document.createElement('div');
+    body.className = 'plan-body text';
+    body.innerHTML = renderMarkdown(text || '_(no plan text)_');
+    wrap.append(body);
+
+    const actions = document.createElement('div');
+    actions.className = 'plan-actions';
+
+    const decide = (decision: 'approve' | 'reject', label: string) => {
+      if (wrap.classList.contains('answered')) return;
+      wrap.classList.add('answered');
+      wrap.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      const chosen = document.createElement('div');
+      chosen.className = 'plan-decision';
+      chosen.textContent = `↳ ${label}`;
+      wrap.append(chosen);
+      if (decision === 'approve') this.onPlanApproved(cwd);
+      void window.cockpit?.agent.answer(cwd, id, decision);
+    };
+
+    const approve = document.createElement('button');
+    approve.className = 'plan-approve';
+    approve.textContent = 'Approve plan';
+    approve.addEventListener('click', () => decide('approve', 'Approved'));
+
+    const reject = document.createElement('button');
+    reject.className = 'plan-reject';
+    reject.textContent = 'Reject';
+    reject.addEventListener('click', () => decide('reject', 'Rejected'));
+
+    actions.append(approve, reject);
+    wrap.append(actions);
+
+    // A replayed plan is history — the turn that proposed it is long since over.
+    if (replaying) {
+      wrap.classList.add('answered', 'past');
+      wrap.querySelectorAll('button').forEach((b) => (b.disabled = true));
     }
+
     this.scrollDown();
   }
 
