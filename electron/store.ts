@@ -243,6 +243,33 @@ export class Store {
   }
 
   /**
+   * Which worktrees are in plan mode — the composer's ◈ Plan toggle. Stored the
+   * same way as thinking mode, and per-worktree for the same reason: planning is
+   * a property of the one task in front of you, not of the whole cockpit.
+   */
+  private planCwds(): string[] {
+    const raw = this.readMeta('planMode');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  planMode(cwd: string): boolean {
+    return this.planCwds().includes(cwd);
+  }
+
+  setPlanMode(cwd: string, on: boolean) {
+    const cwds = new Set(this.planCwds());
+    if (on) cwds.add(cwd);
+    else cwds.delete(cwd);
+    this.writeMeta('planMode', JSON.stringify([...cwds]));
+  }
+
+  /**
    * The model and effort each worktree is pinned to — the composer's two
    * switchers, per-worktree for the same reason thinking mode is. A cheap
    * mechanical worktree can grind on Haiku while the one holding the hard problem

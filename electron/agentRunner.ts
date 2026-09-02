@@ -12,10 +12,18 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import type { AgentEvent, OutboundImage, TodoItem, TodoStatus } from '../src/agent/protocol';
-import { EFFORT_LEVELS, type EffortChoice, type ModelChoice } from '../src/settings';
+import { EFFORT_LEVELS, type EffortChoice, type ModelChoice, type PermissionMode } from '../src/settings';
 
 /** The MCP tool the model uses to ask the operator a question (see start()). */
 const ASK_TOOL = 'mcp__cockpit__ask';
+
+/**
+ * The built-in tool the model calls to leave plan mode. The cockpit hangs the
+ * plan-approval gate off it (see canUseTool): its `plan` input is the markdown
+ * the operator approves or rejects, and approving is what actually switches the
+ * session out of plan mode into real work.
+ */
+const EXIT_PLAN_TOOL = 'ExitPlanMode';
 
 /**
  * Thinking budget used when the operator drops a session into thinking mode.
@@ -51,6 +59,12 @@ export type TurnConfig = {
   /** Model id, or '' for the CLI's default. */
   model: string;
   effort: EffortChoice;
+  /**
+   * The permission mode the turn runs under — the composer's ◈ Plan toggle
+   * resolves to 'plan', anything else to the cockpit's own default. Read at turn
+   * start like the other three, and pushed onto an open session mid-flight.
+   */
+  permissionMode: PermissionMode;
 };
 
 /**
@@ -304,8 +318,21 @@ class Session {
    */
   private model = '';
   private effort: EffortChoice = '';
+  /**
+   * The permission mode the session is running under — the composer's ◈ Plan
+   * toggle. 'default' until the operator turns planning on; kept in sync so a
+   * plan approved mid-turn (which switches the SDK to 'default') isn't undone by
+   * the next turn re-sending 'plan'.
+   */
+  private permissionMode: PermissionMode = 'default';
   /** Open ask-tool calls, by question id, waiting for the operator's answer. */
   private pendingQuestions = new Map<string, (answer: string) => void>();
+  /**
+   * Open ExitPlanMode calls, by plan id, waiting for the operator to approve or
+   * reject. Separate from questions because the answer resolves a *permission*
+   * decision, not a tool result — see canUseTool.
+   */
+  private pendingPlans = new Map<string, (decision: string) => void>();
 
   constructor(cwd: string) {
     this.cwd = cwd;
@@ -327,11 +354,45 @@ class Session {
   }
 
   private canUseTool = async (
-    _toolName: string,
+    toolName: string,
     input: Record<string, unknown>,
   ): Promise<PermissionResult> => {
+    if (toolName === EXIT_PLAN_TOOL) return this.reviewPlan(input);
     return { behavior: 'allow', updatedInput: input };
   };
+
+  /**
+   * The plan-approval gate. In plan mode the model does its read-only research
+   * and then calls ExitPlanMode to propose a plan; that call lands here as a
+   * permission decision. We surface the plan to the operator and block until they
+   * answer — approving lets the turn continue *and* drops the session to 'default'
+   * (via a session-scoped setMode) so the work actually runs, while rejecting
+   * denies the call and leaves the session in plan mode to revise.
+   */
+  private async reviewPlan(input: Record<string, unknown>): Promise<PermissionResult> {
+    const id = randomUUID();
+    const text = String(input.plan ?? '').trim();
+    this.emit({ type: 'plan', id, text });
+    const decision = await new Promise<string>((resolve) => {
+      this.pendingPlans.set(id, resolve);
+    });
+    if (decision === 'approve') {
+      // Mirror the SDK-side switch locally so the next turn doesn't re-enter plan
+      // mode; the renderer clears the composer toggle to match.
+      this.permissionMode = 'default';
+      return {
+        behavior: 'allow',
+        updatedInput: input,
+        updatedPermissions: [{ type: 'setMode', mode: 'default', destination: 'session' }],
+      };
+    }
+    return {
+      behavior: 'deny',
+      message:
+        'The operator rejected this plan. Stay in plan mode and wait for their ' +
+        'guidance on what to change before proposing a revised plan.',
+    };
+  }
 
   /**
    * Drives the diff view. This has to be a hook rather than part of canUseTool:
@@ -362,18 +423,34 @@ class Session {
     return {};
   };
 
-  /** Resolve any open ask-tool call, so its turn unblocks instead of hanging. */
+  /**
+   * Resolve any open ask-tool question or plan-approval gate, so its turn
+   * unblocks instead of hanging. Plans and questions share one id space and one
+   * answer channel; the id says which map it belongs to.
+   */
   answer(id: string, selection: string) {
+    const plan = this.pendingPlans.get(id);
+    if (plan) {
+      this.pendingPlans.delete(id);
+      plan(selection);
+      return;
+    }
     const resolve = this.pendingQuestions.get(id);
     if (!resolve) return;
     this.pendingQuestions.delete(id);
     resolve(selection);
   }
 
-  /** Unblock every open ask-tool call, so an interrupt/close never hangs a turn. */
+  /**
+   * Unblock every open question and plan gate, so an interrupt/close never hangs
+   * a turn. A dangling plan is resolved as a rejection — the safe default, since
+   * approving would let work run that the operator never confirmed.
+   */
   private dismissQuestions(text: string) {
     for (const resolve of this.pendingQuestions.values()) resolve(text);
     this.pendingQuestions.clear();
+    for (const resolve of this.pendingPlans.values()) resolve('reject');
+    this.pendingPlans.clear();
   }
 
   private async start() {
@@ -419,7 +496,7 @@ class Session {
       prompt: this.input(),
       options: {
         cwd: this.cwd,
-        permissionMode: 'default',
+        permissionMode: this.permissionMode,
         includePartialMessages: true,
         // All three are left unset when unpinned, so a plain session keeps the
         // CLI's own defaults rather than having the cockpit's opinion imposed.
@@ -590,6 +667,21 @@ class Session {
   }
 
   /**
+   * Push the composer's ◈ Plan toggle onto a query that is already open. Same
+   * spawn-vs-setter split as the others: a fresh query takes permissionMode as a
+   * spawn option, an open one is told through setPermissionMode. Approving a plan
+   * mid-turn also flips this to 'default', so the toggle and the SDK never drift.
+   */
+  private async applyPermissionMode() {
+    if (!this.query) return;
+    try {
+      await this.query.setPermissionMode(this.permissionMode);
+    } catch (error) {
+      this.emit({ type: 'error', message: `Could not change permission mode: ${(error as Error).message}` });
+    }
+  }
+
+  /**
    * Send one prompt and resolve when that turn finishes. The three switchers ride
    * along on every prompt rather than on channels of their own: the operator can
    * flip any of them with no session open, or mid-turn, and either way the value
@@ -611,17 +703,20 @@ class Session {
       thinking: config.thinking !== this.thinking,
       model: config.model !== this.model,
       effort: config.effort !== this.effort,
+      permissionMode: config.permissionMode !== this.permissionMode,
     };
     this.thinking = config.thinking;
     this.model = config.model;
     this.effort = config.effort;
-    // A fresh query takes all three as spawn options; an open one has to be told.
+    this.permissionMode = config.permissionMode;
+    // A fresh query takes all four as spawn options; an open one has to be told.
     if (!this.query) {
       await this.start();
     } else {
       if (changed.thinking) await this.applyThinking();
       if (changed.model) await this.applyModel();
       if (changed.effort) await this.applyEffort();
+      if (changed.permissionMode) await this.applyPermissionMode();
     }
 
     const content = images.length

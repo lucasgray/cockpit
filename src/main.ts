@@ -64,7 +64,8 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div class="attachments" id="attachments" hidden></div>
           <textarea id="prompt" class="prompt" rows="3"></textarea>
           <div class="composer-actions">
-            <button id="thinking" class="btn toggle" aria-pressed="false">✳ Thinking</button>
+            <button id="thinking" class="btn toggle icon" aria-pressed="false" aria-label="Thinking">✳</button>
+            <button id="plan" class="btn toggle icon" aria-pressed="false" aria-label="Plan">◈</button>
             <button
               id="agent-settings"
               class="btn toggle agent-settings"
@@ -95,16 +96,22 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
 // Clicking a Read/Edit/Write/MultiEdit row in the transcript opens that file
 // in the File pane rather than expanding its raw detail in place.
-const cockpit = new Cockpit((cwd, path) => {
-  setWorkspaceView('file');
-  void fileView.open(cwd, path);
-});
+const cockpit = new Cockpit(
+  (cwd, path) => {
+    setWorkspaceView('file');
+    void fileView.open(cwd, path);
+  },
+  // A plan was approved in the transcript — drop that worktree out of plan mode
+  // so its next turn carries the plan out instead of drafting another.
+  (cwd) => clearPlanFor(cwd),
+);
 const runAppBtn = document.getElementById('run-app') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const promptInput = document.getElementById('prompt') as HTMLTextAreaElement;
 const composer = document.getElementById('composer') as HTMLElement;
 const attachmentTray = document.getElementById('attachments') as HTMLElement;
 const thinkingBtn = document.getElementById('thinking') as HTMLButtonElement;
+const planBtn = document.getElementById('plan') as HTMLButtonElement;
 const agentSettingsBtn = document.getElementById('agent-settings') as HTMLButtonElement;
 const activeWtLabel = document.getElementById('active-wt') as HTMLElement;
 // The two rail views get their own containers rather than sharing one: the
@@ -330,6 +337,7 @@ const rail = new WorktreeRail(
     void restoreDraft(wt);
     void setRunWorktree(wt);
     void setThinkingWorktree(wt);
+    void setPlanWorktree(wt);
     void setAgentWorktree(wt);
     void refreshModels();
     void fileTree.setWorktree(wt);
@@ -354,6 +362,7 @@ const rail = new WorktreeRail(
       // The directory is gone; its run went with it in removeWorktree.
       void setRunWorktree(null);
       void setThinkingWorktree(null);
+      void setPlanWorktree(null);
       void setAgentWorktree(null);
       updateSendStop();
     }
@@ -577,6 +586,71 @@ function toggleThinking() {
 
 thinkingBtn.addEventListener('click', toggleThinking);
 paintThinking();
+
+/**
+ * ◈ Plan: run the active worktree's next turn in plan mode.
+ *
+ * Per-worktree like thinking, and stored the same way — the main process turns
+ * the flag into the turn's permission mode when it starts. On, the agent
+ * researches read-only and proposes a plan the operator approves or rejects in
+ * the transcript; approving executes it and clears this toggle (planFrom), so the
+ * turn after a plan runs as normal work rather than planning all over again.
+ */
+let planOn = false;
+
+function paintPlan() {
+  planBtn.classList.toggle('on', planOn);
+  planBtn.setAttribute('aria-pressed', String(planOn));
+  planBtn.disabled = !window.cockpit || !activeWorktree;
+  planBtn.title = !window.cockpit
+    ? 'Plan mode needs the desktop app'
+    : !activeWorktree
+      ? 'Select a worktree first'
+      : planOn
+        ? `${activeWorktree.name} will plan before acting — Shift+Tab to stop`
+        : `Have ${activeWorktree.name} plan before acting — Shift+Tab`;
+}
+
+/** Adopt a worktree's plan mode; it may have been left on last session. */
+async function setPlanWorktree(wt: Worktree | null) {
+  planOn = false;
+  paintPlan();
+  if (!window.cockpit || !wt) return;
+  const on = await window.cockpit.store.planMode(wt.path);
+  if (activeWorktree?.path !== wt.path) return;
+  planOn = on;
+  paintPlan();
+}
+
+function setPlan(on: boolean) {
+  const cwd = activeWorktree?.path;
+  if (!cwd || !window.cockpit) return;
+  planOn = on;
+  paintPlan();
+  void window.cockpit.store.setPlanMode(cwd, on);
+}
+
+function togglePlan() {
+  setPlan(!planOn);
+}
+
+/**
+ * Clear plan mode for a specific worktree after its plan is approved — the next
+ * turn there should carry out the plan, not draft another. Guarded by cwd
+ * because approval can land on a background worktree while the composer is
+ * pointed elsewhere; only repaint when it's the one on screen.
+ */
+function clearPlanFor(cwd: string) {
+  if (!window.cockpit) return;
+  void window.cockpit.store.setPlanMode(cwd, false);
+  if (activeWorktree?.path === cwd) {
+    planOn = false;
+    paintPlan();
+  }
+}
+
+planBtn.addEventListener('click', togglePlan);
+paintPlan();
 
 /**
  * The model and effort switchers, beside ✳ Thinking and per-worktree for the
@@ -1053,5 +1127,11 @@ promptInput.addEventListener('keydown', (e) => {
   if (e.key === 'Tab' && !e.shiftKey && !thinkingBtn.disabled) {
     e.preventDefault();
     toggleThinking();
+  }
+  // Shift+Tab toggles plan mode, echoing Claude Code's permission-mode cycle.
+  // Same deal: only from the prompt box, so Shift+Tab keeps its focus role.
+  if (e.key === 'Tab' && e.shiftKey && !planBtn.disabled) {
+    e.preventDefault();
+    togglePlan();
   }
 });

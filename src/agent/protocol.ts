@@ -1,5 +1,3 @@
-export type Snippet = { lang: string; code: string };
-
 /** The image types the Messages API takes. A paste of anything else is refused. */
 export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
 
@@ -28,8 +26,6 @@ export type EditOp =
   | { kind: 'replaceString'; find: string; replace: string; note?: string }
   | { kind: 'setContent'; text: string; note?: string };
 
-export type PlanItem = { text: string; snippet?: Snippet };
-
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
 
 export type TodoItem = { text: string; status: TodoStatus };
@@ -49,7 +45,10 @@ export type AgentEvent =
   | { type: 'user'; text: string; images?: TranscriptImage[] }
   | { type: 'thinking'; text: string }
   | { type: 'say'; text: string }
-  | { type: 'plan'; title: string; items: PlanItem[] }
+  // The agent's plan, awaiting the operator's approval. Like `question`, the turn
+  // blocks in the SDK — the ExitPlanMode call can't resolve until the decision
+  // goes back through window.cockpit.agent.answer(cwd, id, 'approve' | 'reject').
+  | { type: 'plan'; id: string; text: string }
   // `parent` is the tool_use id of the subagent this call ran inside, when it
   // ran inside one — the cockpit folds those into that subagent's row rather
   // than scattering them across the transcript.
